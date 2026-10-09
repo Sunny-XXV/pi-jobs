@@ -48,7 +48,7 @@ Do not use `watch` to submit SQL, deployments, builds, or any command with side 
 - Unexpected Pi process death: each runner watches the owning Pi PID and stops its command when that process disappears.
 - Explicit stop: stops the OS service, runner, and command process group.
 - Output: stdout/stderr are stored per attempt and exposed as bounded tails to Pi.
-- State directories and files use modes `0700` and `0600`.
+- State directories and files use modes `0700` and `0600`; the inherited command environment is passed through a private one-shot file that the runner deletes before launching the command.
 
 The current implementation targets macOS and Linux. macOS uses `launchctl bootstrap/bootout`; Linux uses `systemd-run --user` when available and otherwise falls back to a detached runner.
 

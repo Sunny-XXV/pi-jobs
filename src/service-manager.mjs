@@ -92,9 +92,9 @@ export class ServiceManager {
 			terminateTurn: spec.terminateTurn !== false,
 			createdAt,
 			ownerPid: process.pid,
-			env: capturedEnvironment,
 		};
 		atomicWriteJson(join(paths.directory, "config.json"), config);
+		atomicWriteJson(paths.envPath, capturedEnvironment);
 		atomicWriteJson(paths.controlPath, { version: 1, backend: this.backend, serviceName, createdAt });
 		if (this.backend === "launchd") this.#startLaunchd(config, paths);
 		else if (this.backend === "systemd") this.#startSystemd(config, paths);

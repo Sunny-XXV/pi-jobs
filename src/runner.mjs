@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { atomicWriteJson, jobPaths, STATE_VERSION } from "./store.mjs";
 
@@ -36,6 +36,13 @@ export async function runJob(configPath, options = {}) {
 	const now = options.now ?? (() => Date.now());
 	const config = JSON.parse(readFileSync(configPath, "utf8"));
 	const paths = jobPaths(config.sessionDirectory, config.id);
+	let commandEnvironment = config.env || process.env;
+	try {
+		commandEnvironment = JSON.parse(readFileSync(paths.envPath, "utf8"));
+		rmSync(paths.envPath, { force: true });
+	} catch (error) {
+		if (!(error && typeof error === "object" && error.code === "ENOENT")) throw error;
+	}
 	let currentChild;
 	let stopping = false;
 	let forceTimer;
@@ -118,7 +125,7 @@ export async function runJob(configPath, options = {}) {
 		try {
 			child = spawn(config.shell || process.env.PI_JOBS_SHELL || "/bin/bash", ["-c", state.command], {
 				cwd: state.cwd,
-				env: config.env || process.env,
+				env: commandEnvironment,
 				stdio: ["ignore", stdoutFd, stderrFd],
 				detached: process.platform !== "win32",
 			});

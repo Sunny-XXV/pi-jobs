@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,11 +24,11 @@ function config(root, overrides = {}) {
 		maxAttempts: 1,
 		terminateTurn: true,
 		createdAt: Date.now(),
-		env: process.env,
 		...overrides,
 	};
 	const configPath = join(paths.directory, "config.json");
 	atomicWriteJson(configPath, value);
+	atomicWriteJson(paths.envPath, process.env);
 	return { configPath, paths };
 }
 
@@ -44,6 +44,7 @@ test("run executes exactly once even when the command fails", async () => {
 	assert.equal(state.status, "failed");
 	assert.equal(state.attempts, 1);
 	assert.equal(readFileSync(countPath, "utf8"), "x\n");
+	assert.equal(existsSync(paths.envPath), false);
 	assert.equal(JSON.parse(readFileSync(paths.statePath, "utf8")).status, "failed");
 });
 
