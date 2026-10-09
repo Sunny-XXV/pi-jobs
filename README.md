@@ -23,7 +23,7 @@ Executes a command exactly once. Use this for long-running SQL queries, builds, 
 }
 ```
 
-A failed or interrupted `run` job is not automatically restarted. `retry` is the only operation that deliberately creates another execution.
+A failed or interrupted `run` job is not automatically restarted. Each job also creates an atomic execution claim before launching its command, so accidentally starting the same OS service again cannot submit the command twice. `retry` is the only operation that deliberately creates another execution under a new job ID.
 
 ### `watch`
 

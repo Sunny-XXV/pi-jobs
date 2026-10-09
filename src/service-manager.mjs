@@ -96,9 +96,14 @@ export class ServiceManager {
 		atomicWriteJson(join(paths.directory, "config.json"), config);
 		atomicWriteJson(paths.envPath, capturedEnvironment);
 		atomicWriteJson(paths.controlPath, { version: 1, backend: this.backend, serviceName, createdAt });
-		if (this.backend === "launchd") this.#startLaunchd(config, paths);
-		else if (this.backend === "systemd") this.#startSystemd(config, paths);
-		else this.#startDetached(config, paths);
+		try {
+			if (this.backend === "launchd") this.#startLaunchd(config, paths);
+			else if (this.backend === "systemd") this.#startSystemd(config, paths);
+			else this.#startDetached(config, paths);
+		} catch (error) {
+			try { rmSync(paths.directory, { recursive: true, force: true }); } catch {}
+			throw error;
+		}
 		return id;
 	}
 

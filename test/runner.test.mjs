@@ -48,6 +48,20 @@ test("run executes exactly once even when the command fails", async () => {
 	assert.equal(JSON.parse(readFileSync(paths.statePath, "utf8")).status, "failed");
 });
 
+test("a second runner cannot execute an already-claimed job", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-jobs-claim-"));
+	const countPath = join(root, "count");
+	const configured = config(root, { command: `echo x >> ${JSON.stringify(countPath)}` });
+	const first = await runJob(configured.configPath);
+	const second = await runJob(configured.configPath);
+	assert.equal(first.status, "completed");
+	assert.equal(second.status, first.status);
+	assert.equal(second.attempts, first.attempts);
+	assert.equal(second.eventSeq, first.eventSeq);
+	assert.equal(second.runnerPid, first.runnerPid);
+	assert.equal(readFileSync(countPath, "utf8"), "x\n");
+});
+
 test("watch retries a failing predicate until it succeeds", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-jobs-watch-"));
 	const countPath = join(root, "count");

@@ -231,6 +231,7 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		try {
 			updateStatus();
 			for (const job of ledger.pending(registry.list() as Job[])) {
+				if (!currentCtx || !ledger) return;
 				const message = { customType: "job-event", content: formatEvent(job), display: true, details: job };
 				if (currentCtx.isIdle()) {
 					try { pi.sendMessage(message, { triggerTurn: true }); }
@@ -240,6 +241,8 @@ export default function jobsExtension(pi: ExtensionAPI) {
 				}
 				ledger.ack(job);
 			}
+		} catch (error) {
+			if (currentCtx) console.error("pi-jobs: failed to deliver job event:", error);
 		} finally { delivering = false; }
 	};
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { atomicWriteJson, jobPaths, STATE_VERSION } from "./store.mjs";
+import { atomicWriteJson, jobPaths, readJson, STATE_VERSION } from "./store.mjs";
 
 function argument(name) {
 	const index = process.argv.indexOf(name);
@@ -36,6 +36,20 @@ export async function runJob(configPath, options = {}) {
 	const now = options.now ?? (() => Date.now());
 	const config = JSON.parse(readFileSync(configPath, "utf8"));
 	const paths = jobPaths(config.sessionDirectory, config.id);
+	let claim;
+	try {
+		claim = openSync(paths.claimPath, "wx", 0o600);
+		writeFileSync(claim, JSON.stringify({ pid: process.pid, claimedAt: now() }) + "\n");
+	} catch (error) {
+		if (error && typeof error === "object" && error.code === "EEXIST") {
+			const existing = readJson(paths.statePath, undefined);
+			if (existing) return existing;
+			throw new Error("execution was already claimed but no job state exists");
+		}
+		throw error;
+	} finally {
+		if (claim !== undefined) closeSync(claim);
+	}
 	let commandEnvironment = config.env || process.env;
 	try {
 		commandEnvironment = JSON.parse(readFileSync(paths.envPath, "utf8"));
