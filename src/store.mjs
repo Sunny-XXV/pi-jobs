@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 export const STATE_VERSION = 1;
-export const ACTIVE_STATUSES = new Set(["queued", "running", "waiting", "stopping"]);
+export const ACTIVE_STATUSES = new Set(["queued", "running", "stopping"]);
 export const TERMINAL_STATUSES = new Set(["completed", "failed", "timed_out", "stopped"]);
 
 export function sessionPaths(sessionId, root = join(homedir(), ".pi", "agent", "pi-jobs")) {

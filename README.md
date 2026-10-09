@@ -4,15 +4,9 @@ Session-scoped background jobs for [Pi](https://github.com/earendil-works/pi) wi
 
 `pi-jobs` is designed for commands that must keep running while Pi extensions reload. On macOS each job is owned by `launchd`; on Linux it uses a transient user `systemd` unit when available. Reloading Pi disconnects and reconnects the extension without restarting the command.
 
-## Why jobs, not workers?
+## One primitive: `run`
 
-A *worker* can mean a thread, subprocess, or subagent. This package manages durable background **jobs**: commands with explicit ownership, status, output, cancellation, and retry semantics.
-
-## Execution modes
-
-### `run`
-
-Executes a command exactly once. Use this for long-running SQL queries, builds, exports, and other commands that must not be submitted again automatically.
+A job executes one Bash command exactly once:
 
 ```json
 {
@@ -23,23 +17,20 @@ Executes a command exactly once. Use this for long-running SQL queries, builds, 
 }
 ```
 
-A failed or interrupted `run` job is not automatically restarted. Each job also creates an atomic execution claim before launching its command, so accidentally starting the same OS service again cannot submit the command twice. `retry` is the only operation that deliberately creates another execution under a new job ID.
+A failed, interrupted, or timed-out job is never automatically restarted. Each job creates an atomic execution claim before launching its command, so accidentally starting the same OS service again cannot submit the command twice. `retry` is the only operation that deliberately creates another execution under a new job ID.
 
-### `watch`
-
-Repeatedly evaluates a read-only, idempotent Bash predicate. Exit status 0 completes the job; nonzero retries after the configured interval.
+Polling and retry policy belong in the command itself. For example:
 
 ```json
 {
-  "action": "watch",
+  "action": "run",
   "label": "wait for report",
-  "command": "test -f /tmp/report.done",
-  "interval_seconds": 15,
+  "command": "while ! test -f /tmp/report.done; do sleep 15; done",
   "timeout_seconds": 3600
 }
 ```
 
-Do not use `watch` to submit SQL, deployments, builds, or any command with side effects.
+This keeps pi-jobs small: it supervises a process; the process defines its own behavior.
 
 ## Lifecycle guarantees
 
@@ -47,7 +38,7 @@ Do not use `watch` to submit SQL, deployments, builds, or any command with side 
 - `/quit`, `/new`, `/resume`, or `/fork`: active jobs from the old session receive `SIGTERM`; the runner escalates to `SIGKILL` after a short grace period.
 - Unexpected Pi process death: each runner watches the owning Pi PID and stops its command when that process disappears.
 - Explicit stop: stops the OS service, runner, and command process group.
-- Output: stdout/stderr are stored per attempt and exposed as bounded tails to Pi.
+- Output: stdout/stderr are stored per job and exposed as bounded tails to Pi.
 - State directories and files use modes `0700` and `0600`; the inherited command environment is passed through a private one-shot file that the runner deletes before launching the command.
 
 The current implementation targets macOS and Linux. macOS uses `launchctl bootstrap/bootout`; Linux uses `systemd-run --user` when available and otherwise falls back to a detached runner.

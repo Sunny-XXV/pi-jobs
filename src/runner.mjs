@@ -10,10 +10,6 @@ function argument(name) {
 	return process.argv[index + 1];
 }
 
-function sleep(ms) {
-	return new Promise((resolveSleep) => setTimeout(resolveSleep, Math.max(0, ms)));
-}
-
 function signalChild(child, signal) {
 	if (!child || child.exitCode !== null || child.signalCode !== null) return;
 	try {
@@ -50,13 +46,15 @@ export async function runJob(configPath, options = {}) {
 	} finally {
 		if (claim !== undefined) closeSync(claim);
 	}
-	let commandEnvironment = config.env || process.env;
+
+	let commandEnvironment = process.env;
 	try {
 		commandEnvironment = JSON.parse(readFileSync(paths.envPath, "utf8"));
 		rmSync(paths.envPath, { force: true });
 	} catch (error) {
 		if (!(error && typeof error === "object" && error.code === "ENOENT")) throw error;
 	}
+
 	let currentChild;
 	let stopping = false;
 	let forceTimer;
@@ -65,43 +63,36 @@ export async function runJob(configPath, options = {}) {
 		id: config.id,
 		parentId: config.parentId,
 		label: config.label,
-		mode: config.mode,
 		status: "queued",
 		command: config.command,
 		cwd: config.cwd,
-		intervalMs: config.intervalMs,
 		timeoutMs: config.timeoutMs,
-		checkTimeoutMs: config.checkTimeoutMs,
-		maxAttempts: config.maxAttempts,
 		terminateTurn: config.terminateTurn !== false,
 		ownerPid: config.ownerPid,
-		attempts: 0,
 		createdAt: config.createdAt,
 		startedAt: undefined,
 		deadlineAt: config.createdAt + config.timeoutMs,
 		finishedAt: undefined,
-		nextAttemptAt: undefined,
 		runnerPid: process.pid,
 		pid: undefined,
-		lastCode: undefined,
-		lastSignal: undefined,
+		exitCode: undefined,
+		signal: undefined,
 		error: undefined,
 		eventSeq: 0,
 	};
-	const isTerminal = () => ["completed", "failed", "timed_out", "stopped"].includes(state.status);
+	const terminal = () => ["completed", "failed", "timed_out", "stopped"].includes(state.status);
 	const save = () => atomicWriteJson(paths.statePath, state);
 	const finish = (status, extra = {}) => {
-		if (["completed", "failed", "timed_out", "stopped"].includes(state.status)) return;
+		if (terminal()) return;
 		Object.assign(state, extra);
 		state.status = status;
 		state.finishedAt = now();
-		state.nextAttemptAt = undefined;
 		state.pid = undefined;
 		state.eventSeq++;
 		save();
 	};
 	const stop = () => {
-		if (stopping || isTerminal()) return;
+		if (stopping || terminal()) return;
 		stopping = true;
 		state.status = "stopping";
 		save();
@@ -109,6 +100,7 @@ export async function runJob(configPath, options = {}) {
 		forceTimer = setTimeout(() => signalChild(currentChild, "SIGKILL"), 750);
 		forceTimer.unref?.();
 	};
+
 	process.on("SIGTERM", stop);
 	process.on("SIGINT", stop);
 	const ownerWatch = config.ownerPid ? setInterval(() => {
@@ -118,19 +110,12 @@ export async function runJob(configPath, options = {}) {
 	ownerWatch?.unref?.();
 	save();
 
-	while (!stopping) {
-		const remaining = state.deadlineAt - now();
-		if (remaining <= 0 || state.attempts >= state.maxAttempts) {
-			finish("timed_out");
-			break;
-		}
+	const remaining = state.deadlineAt - now();
+	if (remaining <= 0) {
+		finish("timed_out");
+	} else {
 		state.status = "running";
-		state.attempts++;
-		state.startedAt ??= now();
-		state.nextAttemptAt = undefined;
-		state.lastCode = undefined;
-		state.lastSignal = undefined;
-		state.error = undefined;
+		state.startedAt = now();
 		save();
 
 		const stdoutFd = openSync(paths.stdoutPath, "w", 0o600);
@@ -149,57 +134,33 @@ export async function runJob(configPath, options = {}) {
 		} catch (error) {
 			closeSync(stdoutFd);
 			closeSync(stderrFd);
-			state.error = String(error?.message ?? error);
-			if (state.mode === "run") {
-				finish("failed");
-				break;
-			}
-			continue;
+			finish("failed", { error: String(error?.message ?? error) });
 		}
 
-		let attemptTimedOut = false;
-		const timer = setTimeout(() => {
-			attemptTimedOut = true;
-			signalChild(child, "SIGTERM");
-			forceTimer = setTimeout(() => signalChild(child, "SIGKILL"), 750);
-			forceTimer.unref?.();
-		}, Math.max(1, Math.min(state.checkTimeoutMs, remaining)));
-		timer.unref?.();
-		const result = await closeResult(child);
-		clearTimeout(timer);
-		if (forceTimer) clearTimeout(forceTimer);
-		forceTimer = undefined;
-		currentChild = undefined;
-		state.pid = undefined;
-		state.lastCode = result.code;
-		state.lastSignal = result.signal;
-		state.error = result.error;
-		closeSync(stdoutFd);
-		closeSync(stderrFd);
-
-		if (stopping) {
-			finish("stopped");
-			break;
+		if (child) {
+			let timedOut = false;
+			const timeoutTimer = setTimeout(() => {
+				timedOut = true;
+				signalChild(child, "SIGTERM");
+				forceTimer = setTimeout(() => signalChild(child, "SIGKILL"), 750);
+				forceTimer.unref?.();
+			}, Math.max(1, remaining));
+			timeoutTimer.unref?.();
+			const result = await closeResult(child);
+			clearTimeout(timeoutTimer);
+			if (forceTimer) clearTimeout(forceTimer);
+			forceTimer = undefined;
+			currentChild = undefined;
+			closeSync(stdoutFd);
+			closeSync(stderrFd);
+			const extra = { exitCode: result.code, signal: result.signal, error: result.error };
+			if (stopping) finish("stopped", extra);
+			else if (timedOut) finish("timed_out", extra);
+			else finish(result.code === 0 ? "completed" : "failed", extra);
 		}
-		if (!attemptTimedOut && result.code === 0) {
-			finish("completed");
-			break;
-		}
-		if (state.mode === "run") {
-			finish(attemptTimedOut ? "timed_out" : "failed");
-			break;
-		}
-		if (now() >= state.deadlineAt || state.attempts >= state.maxAttempts) {
-			finish("timed_out");
-			break;
-		}
-		state.status = "waiting";
-		state.nextAttemptAt = Math.min(state.deadlineAt, now() + state.intervalMs);
-		save();
-		while (!stopping && now() < state.nextAttemptAt) await sleep(Math.min(200, state.nextAttemptAt - now()));
 	}
 
-	if (stopping && !["completed", "failed", "timed_out", "stopped"].includes(state.status)) finish("stopped");
+	if (stopping && !terminal()) finish("stopped");
 	if (forceTimer) clearTimeout(forceTimer);
 	if (ownerWatch) clearInterval(ownerWatch);
 	process.off("SIGTERM", stop);

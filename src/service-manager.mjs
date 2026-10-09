@@ -67,9 +67,8 @@ export class ServiceManager {
 		const paths = jobPaths(this.sessionDirectory, id);
 		ensurePrivateDirectory(paths.directory);
 		const createdAt = Date.now();
-		const mode = spec.mode === "watch" ? "watch" : "run";
 		const serviceName = "dev.pi.jobs." + this.sessionId.replace(/[^A-Za-z0-9.-]/g, "-").slice(0, 28) + "." + id;
-		const timeoutMs = Math.max(1_000, Number(spec.timeoutMs) || (mode === "watch" ? 3_600_000 : 86_400_000));
+		const timeoutMs = Math.max(1_000, Number(spec.timeoutMs) || 86_400_000);
 		const capturedEnvironment = { ...process.env };
 		delete capturedEnvironment.PI_SESSION_ID;
 		delete capturedEnvironment.PI_SESSION_FILE;
@@ -81,14 +80,10 @@ export class ServiceManager {
 			sessionDirectory: this.sessionDirectory,
 			serviceName,
 			backend: this.backend,
-			label: spec.label?.trim() || (mode === "watch" ? "condition" : "command"),
-			mode,
+			label: spec.label?.trim() || "command",
 			command: spec.command.trim(),
 			cwd: resolve(spec.cwd),
-			intervalMs: Math.max(1_000, Number(spec.intervalMs) || 30_000),
 			timeoutMs,
-			checkTimeoutMs: Math.max(1_000, Number(spec.checkTimeoutMs) || (mode === "watch" ? 60_000 : timeoutMs)),
-			maxAttempts: mode === "run" ? 1 : Math.max(1, Math.round(Number(spec.maxAttempts) || 1000)),
 			terminateTurn: spec.terminateTurn !== false,
 			createdAt,
 			ownerPid: process.pid,
@@ -100,17 +95,12 @@ export class ServiceManager {
 			id,
 			parentId,
 			label: config.label,
-			mode,
 			status: "queued",
 			command: config.command,
 			cwd: config.cwd,
-			intervalMs: config.intervalMs,
 			timeoutMs,
-			checkTimeoutMs: config.checkTimeoutMs,
-			maxAttempts: config.maxAttempts,
 			terminateTurn: config.terminateTurn,
 			ownerPid: config.ownerPid,
-			attempts: 0,
 			createdAt,
 			deadlineAt: createdAt + timeoutMs,
 			eventSeq: 0,
@@ -191,7 +181,6 @@ export class ServiceManager {
 			...state,
 			status: "stopped",
 			finishedAt: Date.now(),
-			nextAttemptAt: undefined,
 			pid: undefined,
 			eventSeq: (state.eventSeq ?? 0) + 1,
 		});

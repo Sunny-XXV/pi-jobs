@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,13 +15,9 @@ function config(root, overrides = {}) {
 		id,
 		sessionDirectory: root,
 		label: "test",
-		mode: "run",
 		command: "true",
 		cwd: root,
-		intervalMs: 5,
 		timeoutMs: 2_000,
-		checkTimeoutMs: 1_000,
-		maxAttempts: 1,
 		terminateTurn: true,
 		createdAt: Date.now(),
 		...overrides,
@@ -37,15 +33,24 @@ test("run executes exactly once even when the command fails", async () => {
 	const countPath = join(root, "count");
 	const { configPath, paths } = config(root, {
 		command: `echo x >> ${JSON.stringify(countPath)}; exit 7`,
-		mode: "run",
-		maxAttempts: 99,
 	});
 	const state = await runJob(configPath);
 	assert.equal(state.status, "failed");
-	assert.equal(state.attempts, 1);
 	assert.equal(readFileSync(countPath, "utf8"), "x\n");
 	assert.equal(existsSync(paths.envPath), false);
 	assert.equal(JSON.parse(readFileSync(paths.statePath, "utf8")).status, "failed");
+});
+
+test("run times out without starting the command again", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-jobs-timeout-"));
+	const countPath = join(root, "count");
+	const { configPath } = config(root, {
+		command: `echo x >> ${JSON.stringify(countPath)}; sleep 5`,
+		timeoutMs: 50,
+	});
+	const state = await runJob(configPath);
+	assert.equal(state.status, "timed_out");
+	assert.equal(readFileSync(countPath, "utf8"), "x\n");
 });
 
 test("a second runner cannot execute an already-claimed job", async () => {
@@ -56,22 +61,9 @@ test("a second runner cannot execute an already-claimed job", async () => {
 	const second = await runJob(configured.configPath);
 	assert.equal(first.status, "completed");
 	assert.equal(second.status, first.status);
-	assert.equal(second.attempts, first.attempts);
 	assert.equal(second.eventSeq, first.eventSeq);
 	assert.equal(second.runnerPid, first.runnerPid);
 	assert.equal(readFileSync(countPath, "utf8"), "x\n");
-});
-
-test("watch retries a failing predicate until it succeeds", async () => {
-	const root = mkdtempSync(join(tmpdir(), "pi-jobs-watch-"));
-	const countPath = join(root, "count");
-	writeFileSync(countPath, "0\n");
-	const command = `n=$(cat ${JSON.stringify(countPath)}); n=$((n+1)); echo "$n" > ${JSON.stringify(countPath)}; test "$n" -ge 3`;
-	const { configPath } = config(root, { command, mode: "watch", maxAttempts: 5, intervalMs: 5 });
-	const state = await runJob(configPath);
-	assert.equal(state.status, "completed");
-	assert.equal(state.attempts, 3);
-	assert.equal(readFileSync(countPath, "utf8"), "3\n");
 });
 
 test("SIGTERM stops a long-running command and its process group", async () => {
@@ -80,7 +72,6 @@ test("SIGTERM stops a long-running command and its process group", async () => {
 	const { configPath, paths } = config(root, {
 		command: `echo $$ > ${JSON.stringify(pidPath)}; while :; do sleep 1; done`,
 		timeoutMs: 10_000,
-		checkTimeoutMs: 10_000,
 	});
 	const running = runJob(configPath);
 	while (true) {
@@ -93,5 +84,4 @@ test("SIGTERM stops a long-running command and its process group", async () => {
 	process.emit("SIGTERM");
 	const state = await running;
 	assert.equal(state.status, "stopped");
-	assert.equal(state.attempts, 1);
 });

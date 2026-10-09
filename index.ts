@@ -12,26 +12,20 @@ type Job = {
 	id: string;
 	parentId?: string;
 	label: string;
-	mode: "run" | "watch";
-	status: "queued" | "running" | "waiting" | "stopping" | "completed" | "failed" | "timed_out" | "stopped";
+	status: "queued" | "running" | "stopping" | "completed" | "failed" | "timed_out" | "stopped";
 	command: string;
 	cwd: string;
-	intervalMs?: number;
 	timeoutMs?: number;
-	checkTimeoutMs?: number;
-	maxAttempts?: number;
 	terminateTurn?: boolean;
 	ownerPid?: number;
-	attempts: number;
 	createdAt: number;
 	startedAt?: number;
 	deadlineAt: number;
 	finishedAt?: number;
-	nextAttemptAt?: number;
 	runnerPid?: number;
 	pid?: number;
-	lastCode?: number | null;
-	lastSignal?: string;
+	exitCode?: number | null;
+	signal?: string;
 	lastStdout?: string;
 	lastStderr?: string;
 	runnerStderr?: string;
@@ -42,21 +36,17 @@ type Job = {
 const Params = Type.Object({
 	action: Type.Union([
 		Type.Literal("run"),
-		Type.Literal("watch"),
 		Type.Literal("list"),
 		Type.Literal("show"),
 		Type.Literal("stop"),
 		Type.Literal("retry"),
 		Type.Literal("remove"),
 	]),
-	command: Type.Optional(Type.String({ description: "Bash command for run/watch" })),
+	command: Type.Optional(Type.String({ description: "Bash command to execute once" })),
 	label: Type.Optional(Type.String({ description: "Short human-readable job label" })),
 	id: Type.Optional(Type.String({ description: "Job id; stop accepts all and remove accepts finished" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory; defaults to the Pi session cwd" })),
-	interval_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 3600, description: "watch only: delay between attempts; default 30" })),
-	timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 604800, description: "Overall deadline; run defaults to 86400, watch to 3600" })),
-	attempt_timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 86400, description: "watch only: timeout for each attempt; default 60" })),
-	max_attempts: Type.Optional(Type.Number({ minimum: 1, maximum: 100000, description: "watch only: maximum attempts; default 1000" })),
+	timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 604800, description: "Overall deadline; defaults to 86400" })),
 	terminate_turn: Type.Optional(Type.Boolean({ description: "Stop the current model turn after starting; default true" })),
 });
 
@@ -75,7 +65,6 @@ function statusColor(status: Job["status"]): "accent" | "success" | "warning" | 
 	if (status === "completed") return "success";
 	if (status === "failed") return "error";
 	if (status === "timed_out" || status === "stopped") return "warning";
-	if (status === "waiting") return "dim";
 	return "accent";
 }
 
@@ -143,7 +132,7 @@ async function openJobsDashboard(registry: JobRegistry, ctx: ExtensionContext): 
 				const listLines = visible.length ? visible.slice(listStart, listStart + listHeight).map((item, offset) => {
 					const index = listStart + offset;
 					const marker = index === selected ? "› " : "  ";
-					const line = `${marker}${item.id}  ${item.mode.padEnd(5)} ${item.status.padEnd(9)} ${String(item.attempts).padStart(3)}x  ${elapsed(item)}  ${item.label}`;
+					const line = `${marker}${item.id}  ${item.status.padEnd(9)} ${elapsed(item)}  ${item.label}`;
 					return index === selected ? theme.fg("accent", theme.bold(line)) : theme.fg(statusColor(item.status), line);
 				}) : [theme.fg("dim", "No jobs in this view")];
 
@@ -287,7 +276,7 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		label: "Jobs",
 		description: [
 			"Run and manage session-scoped background jobs through launchd on macOS or systemd on Linux. Jobs survive /reload without restarting the command, and are stopped when the owning Pi session ends or is replaced.",
-			"Use action=run for one execution, including long-running SQL or builds. A run command is never automatically submitted twice. Use action=watch only for a read-only, idempotent predicate: exit 0 completes; non-zero retries after interval_seconds.",
+			"Use action=run for one execution, including long-running SQL, builds, or a user-defined polling loop. A command is never automatically submitted twice.",
 			"The default terminate_turn=true ends the current model turn after starting; completion wakes the session. Set false only when useful foreground work should continue independently.",
 			"Use list/show/stop/retry/remove for management. retry is the only operation that deliberately creates another execution of a finished job.",
 		].join(" "),
@@ -323,24 +312,18 @@ export default function jobsExtension(pi: ExtensionAPI) {
 
 			if (ctx.mode !== "tui" && ctx.mode !== "rpc") throw new Error("jobs requires a long-lived Pi TUI or RPC session");
 			if (!params.command?.trim()) throw new Error("command is required for action=" + params.action);
-			const mode = params.action as "run" | "watch";
 			const terminateTurn = params.terminate_turn !== false;
-			const timeoutMs = seconds(params.timeout_seconds, mode === "watch" ? 3600 : 86400);
 			const job = jobs.start({
-				mode,
 				command: params.command.trim(),
 				label: params.label,
 				cwd: params.cwd?.trim() || ctx.cwd,
-				intervalMs: seconds(params.interval_seconds, 30),
-				timeoutMs,
-				checkTimeoutMs: mode === "watch" ? seconds(params.attempt_timeout_seconds, 60) : timeoutMs,
-				maxAttempts: mode === "watch" ? Math.round(params.max_attempts ?? 1000) : 1,
+				timeoutMs: seconds(params.timeout_seconds, 86400),
 				terminateTurn,
 			}) as Job;
 			updateStatus();
 			return {
-				content: [{ type: "text", text: `Started ${mode} job ${job.id} (${job.label}). It is owned by the OS service manager and will survive /reload without restarting the command.${terminateTurn ? " This turn will now stop; completion will wake the session." : " This turn may continue while it runs."}` }],
-				details: { action: mode, job },
+				content: [{ type: "text", text: `Started job ${job.id} (${job.label}). It is owned by the OS service manager and will survive /reload without restarting the command.${terminateTurn ? " This turn will now stop; completion will wake the session." : " This turn may continue while it runs."}` }],
+				details: { action: "run", job },
 				terminate: terminateTurn,
 			};
 		},

@@ -33,13 +33,10 @@ integration("launchd job survives client recreation without duplicate submission
 	const countPath = join(root, "submissions");
 	let registry = createRegistry(root, sessionId);
 	const started = registry.start({
-		mode: "run",
 		label: "long sql simulation",
 		command: `echo submit >> ${JSON.stringify(countPath)}; sleep 2; echo done`,
 		cwd: root,
 		timeoutMs: 10_000,
-		checkTimeoutMs: 10_000,
-		maxAttempts: 1,
 		terminateTurn: true,
 	});
 	t.after(() => {
@@ -58,7 +55,6 @@ integration("launchd job survives client recreation without duplicate submission
 	assert.equal(readFileSync(countPath, "utf8"), "submit\n");
 
 	const completed = await waitFor(() => registry.get(started.id), (job) => job.status === "completed");
-	assert.equal(completed.attempts, 1);
 	assert.equal(readFileSync(countPath, "utf8"), "submit\n");
 	assert.match(completed.lastStdout, /done/);
 });
@@ -68,13 +64,10 @@ integration("launchd stop terminates an active job", async (t) => {
 	const sessionId = "integration-stop-" + Date.now();
 	const registry = createRegistry(root, sessionId);
 	const started = registry.start({
-		mode: "run",
 		label: "stop test",
 		command: "while :; do sleep 1; done",
 		cwd: root,
 		timeoutMs: 30_000,
-		checkTimeoutMs: 30_000,
-		maxAttempts: 1,
 		terminateTurn: true,
 	});
 	t.after(() => {
@@ -83,6 +76,5 @@ integration("launchd stop terminates an active job", async (t) => {
 	});
 	await waitFor(() => registry.get(started.id), (job) => job.status === "running" && job.pid);
 	assert.equal(registry.stop(started.id), 1);
-	const stopped = await waitFor(() => registry.get(started.id), (job) => job.status === "stopped");
-	assert.equal(stopped.attempts, 1);
+	await waitFor(() => registry.get(started.id), (job) => job.status === "stopped");
 });
