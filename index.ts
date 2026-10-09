@@ -130,7 +130,7 @@ async function openJobsDashboard(registry: JobRegistry, ctx: ExtensionContext): 
 
 		return {
 			render(width: number): string[] {
-				const renderWidth = Math.max(24, width);
+				const renderWidth = Math.max(1, width);
 				const visible = filtered();
 				const job = current();
 				const active = jobs.filter((item) => !terminal(item)).length;
@@ -138,7 +138,10 @@ async function openJobsDashboard(registry: JobRegistry, ctx: ExtensionContext): 
 				const help = confirm
 					? theme.fg("warning", `Confirm ${confirm}?  y yes · any other key cancel`)
 					: theme.fg("dim", "↑↓/jk select · tab filter · f follow · r retry · x stop · d remove · q close");
-				const listLines = visible.length ? visible.map((item, index) => {
+				const listHeight = 19;
+				const listStart = Math.max(0, Math.min(selected - Math.floor(listHeight / 2), Math.max(0, visible.length - listHeight)));
+				const listLines = visible.length ? visible.slice(listStart, listStart + listHeight).map((item, offset) => {
+					const index = listStart + offset;
 					const marker = index === selected ? "› " : "  ";
 					const line = `${marker}${item.id}  ${item.mode.padEnd(5)} ${item.status.padEnd(9)} ${String(item.attempts).padStart(3)}x  ${elapsed(item)}  ${item.label}`;
 					return index === selected ? theme.fg("accent", theme.bold(line)) : theme.fg(statusColor(item.status), line);
