@@ -22,6 +22,7 @@ export function jobPaths(sessionDirectory, id) {
 		statePath: join(directory, "state.json"),
 		controlPath: join(directory, "control.json"),
 		claimPath: join(directory, "execution.claim"),
+		readyPath: join(directory, "ready"),
 		envPath: join(directory, "env.json"),
 		stdoutPath: join(directory, "stdout.log"),
 		stderrPath: join(directory, "stderr.log"),

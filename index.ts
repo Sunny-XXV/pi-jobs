@@ -7,6 +7,7 @@ import { NotificationLedger } from "./src/notifications.mjs";
 import { JobRegistry } from "./src/registry.mjs";
 import { ServiceManager } from "./src/service-manager.mjs";
 import { ensurePrivateDirectory, sessionPaths, TERMINAL_STATUSES } from "./src/store.mjs";
+import { WakeRuntime } from "./src/wake-runtime.mjs";
 
 type Job = {
 	id: string;
@@ -16,6 +17,9 @@ type Job = {
 	command: string;
 	cwd: string;
 	timeoutMs?: number;
+	readiness?: "process" | "signal";
+	readyTimeoutMs?: number;
+	readinessEvidence?: "process" | "signal" | "terminal";
 	terminateTurn?: boolean;
 	ownerPid?: number;
 	createdAt: number;
@@ -33,22 +37,31 @@ type Job = {
 	eventSeq?: number;
 };
 
-const Params = Type.Object({
-	action: Type.Union([
-		Type.Literal("run"),
-		Type.Literal("list"),
-		Type.Literal("show"),
-		Type.Literal("stop"),
-		Type.Literal("retry"),
-		Type.Literal("remove"),
-	]),
-	command: Type.Optional(Type.String({ description: "Bash command to execute once" })),
-	label: Type.Optional(Type.String({ description: "Short human-readable job label" })),
-	id: Type.Optional(Type.String({ description: "Job id; stop accepts all and remove accepts finished" })),
-	cwd: Type.Optional(Type.String({ description: "Working directory; defaults to the Pi session cwd" })),
-	timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 604800, description: "Overall deadline; defaults to 86400" })),
-	terminate_turn: Type.Optional(Type.Boolean({ description: "Stop the current model turn after starting; default true" })),
+const IdParams = (action: "show" | "stop" | "retry" | "remove") => Type.Object({
+	action: Type.Literal(action),
+	id: Type.String({ description: action === "stop" ? "Job id or all" : action === "remove" ? "Job id or finished" : "Job id" }),
 });
+
+const Params = Type.Union([
+	Type.Object({
+		action: Type.Literal("run"),
+		command: Type.String({ description: "Bash command to execute once" }),
+		label: Type.Optional(Type.String({ description: "Short human-readable job label" })),
+		cwd: Type.Optional(Type.String({ description: "Working directory; defaults to the Pi session cwd" })),
+		timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 604800, description: "Overall deadline; defaults to 86400" })),
+		readiness: Type.Union([
+			Type.Literal("process"),
+			Type.Literal("signal"),
+		], { description: "Required startup evidence before the tool may end the turn. Use process only when a live runner and command PID are sufficient. Use signal for remote submissions and watchdogs; the command must touch $PI_JOB_READY after acceptance or its first successful health check." }),
+		ready_timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 3600, description: "Maximum wait for readiness evidence; default 30" })),
+		terminate_turn: Type.Optional(Type.Boolean({ description: "Stop the current model turn after readiness is confirmed; default true" })),
+	}),
+	Type.Object({ action: Type.Literal("list") }),
+	IdParams("show"),
+	IdParams("stop"),
+	IdParams("retry"),
+	IdParams("remove"),
+]);
 
 function seconds(value: number | undefined, fallback: number): number {
 	return Math.round((value ?? fallback) * 1000);
@@ -170,8 +183,14 @@ async function openJobsDashboard(registry: JobRegistry, ctx: ExtensionContext): 
 							if (action === "stop") notice = registry.stop(job.id) ? "Stop requested for " + job.id : "Job is no longer active";
 							else if (action === "remove") notice = registry.remove(job.id) ? "Removed " + job.id : "Only finished jobs can be removed";
 							else {
-								const retried = registry.retry(job.id) as Job;
-								notice = `Started ${retried.id} from ${job.id}`;
+								notice = `Starting retry of ${job.id}…`;
+								void registry.retry(job.id).then((retried: Job) => {
+									notice = `Started ${retried.id} from ${job.id}`;
+									refresh();
+								}).catch((error: unknown) => {
+									notice = String((error as Error)?.message ?? error);
+									tui.requestRender();
+								});
 							}
 						} catch (error) { notice = String((error as Error)?.message ?? error); }
 						refresh();
@@ -202,16 +221,21 @@ export default function jobsExtension(pi: ExtensionAPI) {
 	let ledger: NotificationLedger | undefined;
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
 	let delivering = false;
+	let wakeRuntime: WakeRuntime | undefined;
 
 	const requireRegistry = () => {
 		if (!registry) throw new Error("Pi Jobs is not attached to a session");
 		return registry;
 	};
 
+	let lastStatusText: string | undefined;
 	const updateStatus = () => {
 		if (!currentCtx?.hasUI || !registry) return;
 		const active = (registry.list() as Job[]).filter((job) => !terminal(job)).length;
-		currentCtx.ui.setStatus("jobs", active ? currentCtx.ui.theme.fg("accent", "jobs:" + active) : undefined);
+		const statusText = active ? currentCtx.ui.theme.fg("accent", "jobs:" + active) : undefined;
+		if (statusText === lastStatusText) return;
+		lastStatusText = statusText;
+		currentCtx.ui.setStatus("jobs", statusText);
 	};
 
 	const deliverEvents = async () => {
@@ -219,16 +243,17 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		delivering = true;
 		try {
 			updateStatus();
-			for (const job of ledger.pending(registry.list() as Job[])) {
-				if (!currentCtx || !ledger) return;
+			const job = ledger.next(registry.list() as Job[], { retryUnstarted: currentCtx.isIdle() });
+			if (job && currentCtx && ledger) {
 				const message = { customType: "job-event", content: formatEvent(job), display: true, details: job };
-				if (currentCtx.isIdle()) {
-					try { pi.sendMessage(message, { triggerTurn: true }); }
-					catch { pi.sendMessage(message, { triggerTurn: true, deliverAs: job.terminateTurn === false ? "steer" : "followUp" }); }
-				} else {
-					pi.sendMessage(message, { triggerTurn: true, deliverAs: job.terminateTurn === false ? "steer" : "followUp" });
+				try {
+					ledger.sent(job);
+					if (currentCtx.isIdle()) pi.sendMessage(message, { triggerTurn: true });
+					else pi.sendMessage(message, { triggerTurn: true, deliverAs: job.terminateTurn === false ? "steer" : "followUp" });
+				} catch (error) {
+					ledger.failed(job);
+					throw error;
 				}
-				ledger.ack(job);
 			}
 		} catch (error) {
 			if (currentCtx) console.error("pi-jobs: failed to deliver job event:", error);
@@ -243,8 +268,23 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		const serviceManager = new ServiceManager({ sessionId, sessionDirectory: paths.directory });
 		registry = new JobRegistry({ sessionDirectory: paths.directory, serviceManager });
 		ledger = new NotificationLedger(paths.directory);
+		wakeRuntime = new WakeRuntime(ledger);
 		pollTimer = setInterval(() => void deliverEvents(), 750);
 		pollTimer.unref?.();
+		void deliverEvents();
+	});
+
+	pi.on("message_start", (event) => {
+		wakeRuntime?.messageStart(event.message);
+	});
+
+	pi.on("message_end", (event) => {
+		wakeRuntime?.messageEnd(event.message);
+	});
+
+	pi.on("agent_settled" as any, (event: { aborted?: boolean }) => {
+		if (!wakeRuntime) return;
+		wakeRuntime.settled(event);
 		void deliverEvents();
 	});
 
@@ -253,9 +293,12 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		pollTimer = undefined;
 		if (event.reason !== "reload" && registry) registry.stop("all");
 		ctx.ui.setStatus("jobs", undefined);
+		lastStatusText = undefined;
+		wakeRuntime?.reset();
 		currentCtx = undefined;
 		registry = undefined;
 		ledger = undefined;
+		wakeRuntime = undefined;
 	});
 
 	pi.registerMessageRenderer("job-event", (message, { outputPad }, theme) => {
@@ -276,10 +319,17 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		label: "Jobs",
 		description: [
 			"Run and manage session-scoped background jobs through launchd on macOS or systemd on Linux. Jobs survive /reload without restarting the command, and are stopped when the owning Pi session ends or is replaced.",
-			"Use action=run for one execution, including long-running SQL, builds, or a user-defined polling loop. A command is never automatically submitted twice.",
-			"The default terminate_turn=true ends the current model turn after starting; completion wakes the session. Set false only when useful foreground work should continue independently.",
+			"Use action=run for one execution, including long-running SQL, builds, or a user-defined watchdog loop. A command is never automatically submitted twice.",
+			"Before returning, process readiness confirms both runner and command PIDs. For jobs that can fail silently after spawn, use readiness=signal and make the command touch $PI_JOB_READY only after external submission or its first successful health check.",
+			"The default terminate_turn=true ends the current model turn only after readiness is confirmed. Terminal completion is delivered through a durable at-least-once wake; duplicate reminders are preferable to a lost wake. Set false only when useful foreground work should continue independently.",
 			"Use list/show/stop/retry/remove for management. retry is the only operation that deliberately creates another execution of a finished job.",
 		].join(" "),
+		promptSnippet: "Run one durable background command and wake this session at terminal completion",
+		promptGuidelines: [
+			"Use jobs run instead of agent-driven polling for long SQL, builds, and quiet watchdog loops.",
+			"When ending the turn depends on proof beyond a spawned PID, set readiness=signal and make the command touch $PI_JOB_READY only after remote submission is accepted or the watchdog completes its first successful health check.",
+			"After a successful terminating run call, do not poll jobs yourself; wait for the durable terminal event to wake the session.",
+		],
 		parameters: Params,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			currentCtx = ctx;
@@ -306,25 +356,39 @@ export default function jobsExtension(pi: ExtensionAPI) {
 			}
 			if (params.action === "retry") {
 				if (!params.id) throw new Error("id is required for action=retry");
-				const job = jobs.retry(params.id) as Job;
+				const job = await jobs.retry(params.id) as Job;
 				return { content: [{ type: "text", text: `Started job ${job.id} as an explicit retry of ${params.id}.` }], details: { action: "retry", job } };
 			}
 
 			if (ctx.mode !== "tui" && ctx.mode !== "rpc") throw new Error("jobs requires a long-lived Pi TUI or RPC session");
-			if (!params.command?.trim()) throw new Error("command is required for action=" + params.action);
+			if (!params.command.trim()) throw new Error("command must not be empty");
 			const terminateTurn = params.terminate_turn !== false;
-			const job = jobs.start({
-				command: params.command.trim(),
-				label: params.label,
-				cwd: params.cwd?.trim() || ctx.cwd,
-				timeoutMs: seconds(params.timeout_seconds, 86400),
-				terminateTurn,
-			}) as Job;
+			let job: Job;
+			try {
+				job = await jobs.start({
+					command: params.command.trim(),
+					label: params.label,
+					cwd: params.cwd?.trim() || ctx.cwd,
+					timeoutMs: seconds(params.timeout_seconds, 86400),
+					readiness: params.readiness,
+					readyTimeoutMs: seconds(params.ready_timeout_seconds, 30),
+					terminateTurn,
+				}) as Job;
+			} catch (error) {
+				updateStatus();
+				void deliverEvents();
+				throw error;
+			}
+			const readyEvidence = job.readinessEvidence ?? (TERMINAL_STATUSES.has(job.status) ? "terminal" : job.readiness === "signal" ? "signal" : "process");
 			updateStatus();
+			const terminalNow = TERMINAL_STATUSES.has(job.status);
+			if (terminalNow) ledger?.ack(job);
 			return {
-				content: [{ type: "text", text: `Started job ${job.id} (${job.label}). It is owned by the OS service manager and will survive /reload without restarting the command.${terminateTurn ? " This turn will now stop; completion will wake the session." : " This turn may continue while it runs."}` }],
+				content: [{ type: "text", text: terminalNow
+					? `Job ${job.id} (${job.label}) finished during startup verification with status ${job.status}.\n\n${formatDetails(job)}`
+					: `Started job ${job.id} (${job.label}); readiness=${readyEvidence} confirmed. It is owned by the OS service manager and will survive /reload without restarting the command.${terminateTurn ? " This turn will now stop; terminal completion has a durable at-least-once wake." : " This turn may continue while it runs."}` }],
 				details: { action: "run", job },
-				terminate: terminateTurn,
+				terminate: terminateTurn && !terminalNow,
 			};
 		},
 	});
@@ -350,7 +414,7 @@ export default function jobsExtension(pi: ExtensionAPI) {
 				return ctx.ui.notify(count ? `Removed ${count} finished job(s).` : `No finished job matched ${request.id}.`, count ? "info" : "warning");
 			}
 			try {
-				const job = jobs.retry(request.id) as Job;
+				const job = await jobs.retry(request.id) as Job;
 				ctx.ui.notify(`Started ${job.id} as a retry of ${request.id}.`, "info");
 			} catch (error) { ctx.ui.notify(String((error as Error)?.message ?? error), "error"); }
 		},

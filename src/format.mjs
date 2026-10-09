@@ -17,6 +17,7 @@ export function formatDetails(job) {
 		"id: " + job.id,
 		"label: " + job.label,
 		"status: " + job.status,
+		"readiness: " + (job.readiness ?? "process"),
 		"elapsed_seconds: " + age(job),
 		"cwd: " + job.cwd,
 		"command: " + job.command,

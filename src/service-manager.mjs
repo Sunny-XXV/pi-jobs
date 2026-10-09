@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACTIVE_STATUSES, atomicWriteJson, createJobId, ensurePrivateDirectory, jobPaths, readJson } from "./store.mjs";
@@ -17,6 +18,10 @@ function nodePath() {
 	const result = shell("/usr/bin/env", ["sh", "-c", "command -v node"]);
 	if (result.code === 0 && result.stdout.trim().startsWith("/")) return resolve(result.stdout.trim());
 	throw new Error("Node.js executable not found; set PI_JOBS_NODE to its absolute path");
+}
+
+function serviceSessionKey(sessionId) {
+	return createHash("sha256").update(sessionId).digest("hex").slice(0, 20);
 }
 
 function environment() {
@@ -67,9 +72,11 @@ export class ServiceManager {
 		const paths = jobPaths(this.sessionDirectory, id);
 		ensurePrivateDirectory(paths.directory);
 		const createdAt = Date.now();
-		const serviceName = "dev.pi.jobs." + this.sessionId.replace(/[^A-Za-z0-9.-]/g, "-").slice(0, 28) + "." + id;
+		const serviceName = "dev.pi.jobs." + serviceSessionKey(this.sessionId) + "." + id;
 		const timeoutMs = Math.max(1_000, Number(spec.timeoutMs) || 86_400_000);
-		const capturedEnvironment = { ...process.env };
+		const readiness = spec.readiness === "signal" ? "signal" : "process";
+		const readyTimeoutMs = Math.min(timeoutMs, Math.max(1_000, Number(spec.readyTimeoutMs) || 30_000));
+		const capturedEnvironment = { ...process.env, PI_JOB_READY: paths.readyPath };
 		delete capturedEnvironment.PI_SESSION_ID;
 		delete capturedEnvironment.PI_SESSION_FILE;
 		const config = {
@@ -84,6 +91,8 @@ export class ServiceManager {
 			command: spec.command.trim(),
 			cwd: resolve(spec.cwd),
 			timeoutMs,
+			readiness,
+			readyTimeoutMs,
 			terminateTurn: spec.terminateTurn !== false,
 			createdAt,
 			ownerPid: process.pid,
@@ -99,6 +108,8 @@ export class ServiceManager {
 			command: config.command,
 			cwd: config.cwd,
 			timeoutMs,
+			readiness,
+			readyTimeoutMs,
 			terminateTurn: config.terminateTurn,
 			ownerPid: config.ownerPid,
 			createdAt,
@@ -143,12 +154,18 @@ export class ServiceManager {
 	#startDetached(config, paths) {
 		const out = openSync(paths.runnerStdoutPath, "a", 0o600);
 		const err = openSync(paths.runnerStderrPath, "a", 0o600);
-		const child = spawn(this.executable, [this.runnerPath, "--config", join(paths.directory, "config.json")], {
-			cwd: config.cwd,
-			env: process.env,
-			stdio: ["ignore", out, err],
-			detached: true,
-		});
+		let child;
+		try {
+			child = spawn(this.executable, [this.runnerPath, "--config", join(paths.directory, "config.json")], {
+				cwd: config.cwd,
+				env: process.env,
+				stdio: ["ignore", out, err],
+				detached: true,
+			});
+		} finally {
+			closeSync(out);
+			closeSync(err);
+		}
 		child.unref();
 		atomicWriteJson(paths.controlPath, { version: 1, backend: "detached", serviceName: config.serviceName, runnerPid: child.pid, createdAt: config.createdAt });
 	}
@@ -206,7 +223,7 @@ export class ServiceManager {
 
 	remove(id) {
 		const paths = jobPaths(this.sessionDirectory, id);
-		this.release(id);
+		if (!this.release(id)) return false;
 		try { rmSync(paths.directory, { recursive: true, force: true }); return true; } catch { return false; }
 	}
 }

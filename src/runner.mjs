@@ -67,6 +67,8 @@ export async function runJob(configPath, options = {}) {
 		command: config.command,
 		cwd: config.cwd,
 		timeoutMs: config.timeoutMs,
+		readiness: config.readiness ?? "process",
+		readyTimeoutMs: config.readyTimeoutMs,
 		terminateTurn: config.terminateTurn !== false,
 		ownerPid: config.ownerPid,
 		createdAt: config.createdAt,
@@ -110,62 +112,70 @@ export async function runJob(configPath, options = {}) {
 	ownerWatch?.unref?.();
 	save();
 
-	const remaining = state.deadlineAt - now();
-	if (remaining <= 0) {
-		finish("timed_out");
-	} else {
-		state.status = "running";
-		state.startedAt = now();
-		save();
-
-		const stdoutFd = openSync(paths.stdoutPath, "w", 0o600);
-		const stderrFd = openSync(paths.stderrPath, "w", 0o600);
-		let child;
-		try {
-			child = spawn(config.shell || process.env.PI_JOBS_SHELL || "/bin/bash", ["-c", state.command], {
-				cwd: state.cwd,
-				env: commandEnvironment,
-				stdio: ["ignore", stdoutFd, stderrFd],
-				detached: process.platform !== "win32",
-			});
-			currentChild = child;
-			state.pid = child.pid;
+	try {
+		const remaining = state.deadlineAt - now();
+		if (remaining <= 0) {
+			finish("timed_out");
+		} else {
+			state.status = "running";
+			state.startedAt = now();
 			save();
-		} catch (error) {
-			closeSync(stdoutFd);
-			closeSync(stderrFd);
-			finish("failed", { error: String(error?.message ?? error) });
-		}
 
-		if (child) {
-			let timedOut = false;
-			const timeoutTimer = setTimeout(() => {
-				timedOut = true;
-				signalChild(child, "SIGTERM");
-				forceTimer = setTimeout(() => signalChild(child, "SIGKILL"), 750);
-				forceTimer.unref?.();
-			}, Math.max(1, remaining));
-			timeoutTimer.unref?.();
-			const result = await closeResult(child);
-			clearTimeout(timeoutTimer);
-			if (forceTimer) clearTimeout(forceTimer);
-			forceTimer = undefined;
-			currentChild = undefined;
-			closeSync(stdoutFd);
-			closeSync(stderrFd);
-			const extra = { exitCode: result.code, signal: result.signal, error: result.error };
-			if (stopping) finish("stopped", extra);
-			else if (timedOut) finish("timed_out", extra);
-			else finish(result.code === 0 ? "completed" : "failed", extra);
+			await Promise.resolve();
+			if (stopping) {
+				finish("stopped");
+				return state;
+			}
+
+			const stdoutFd = openSync(paths.stdoutPath, "w", 0o600);
+			const stderrFd = openSync(paths.stderrPath, "w", 0o600);
+			let child;
+			try {
+				child = spawn(config.shell || process.env.PI_JOBS_SHELL || "/bin/bash", ["-c", state.command], {
+					cwd: state.cwd,
+					env: commandEnvironment,
+					stdio: ["ignore", stdoutFd, stderrFd],
+					detached: process.platform !== "win32",
+				});
+				currentChild = child;
+				state.pid = child.pid;
+				save();
+			} catch (error) {
+				closeSync(stdoutFd);
+				closeSync(stderrFd);
+				finish("failed", { error: String(error?.message ?? error) });
+			}
+
+			if (child) {
+				let timedOut = false;
+				const timeoutTimer = setTimeout(() => {
+					timedOut = true;
+					signalChild(child, "SIGTERM");
+					forceTimer = setTimeout(() => signalChild(child, "SIGKILL"), 750);
+					forceTimer.unref?.();
+				}, Math.max(1, remaining));
+				timeoutTimer.unref?.();
+				const result = await closeResult(child);
+				clearTimeout(timeoutTimer);
+				if (forceTimer) clearTimeout(forceTimer);
+				forceTimer = undefined;
+				currentChild = undefined;
+				closeSync(stdoutFd);
+				closeSync(stderrFd);
+				const extra = { exitCode: result.code, signal: result.signal, error: result.error };
+				if (stopping) finish("stopped", extra);
+				else if (timedOut) finish("timed_out", extra);
+				else finish(result.code === 0 ? "completed" : "failed", extra);
+			}
 		}
+		if (stopping && !terminal()) finish("stopped");
+		return state;
+	} finally {
+		if (forceTimer) clearTimeout(forceTimer);
+		if (ownerWatch) clearInterval(ownerWatch);
+		process.off("SIGTERM", stop);
+		process.off("SIGINT", stop);
 	}
-
-	if (stopping && !terminal()) finish("stopped");
-	if (forceTimer) clearTimeout(forceTimer);
-	if (ownerWatch) clearInterval(ownerWatch);
-	process.off("SIGTERM", stop);
-	process.off("SIGINT", stop);
-	return state;
 }
 
 async function main() {

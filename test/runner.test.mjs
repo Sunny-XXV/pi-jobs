@@ -41,6 +41,16 @@ test("run executes exactly once even when the command fails", async () => {
 	assert.equal(JSON.parse(readFileSync(paths.statePath, "utf8")).status, "failed");
 });
 
+test("signal readiness path is exposed only to the command environment", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-jobs-ready-env-"));
+	const configured = config(root, { command: 'test -n "$PI_JOB_READY" && touch "$PI_JOB_READY"' });
+	atomicWriteJson(configured.paths.envPath, { ...process.env, PI_JOB_READY: configured.paths.readyPath });
+	const state = await runJob(configured.configPath);
+	assert.equal(state.status, "completed");
+	assert.equal(existsSync(configured.paths.readyPath), true);
+	assert.equal(existsSync(configured.paths.envPath), false);
+});
+
 test("run times out without starting the command again", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-jobs-timeout-"));
 	const countPath = join(root, "count");
@@ -64,6 +74,17 @@ test("a second runner cannot execute an already-claimed job", async () => {
 	assert.equal(second.eventSeq, first.eventSeq);
 	assert.equal(second.runnerPid, first.runnerPid);
 	assert.equal(readFileSync(countPath, "utf8"), "x\n");
+});
+
+test("a stop received before spawn does not execute the command", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-jobs-stop-before-spawn-"));
+	const countPath = join(root, "count");
+	const configured = config(root, { command: `echo x >> ${JSON.stringify(countPath)}` });
+	const running = runJob(configured.configPath);
+	process.emit("SIGTERM");
+	const state = await running;
+	assert.equal(state.status, "stopped");
+	assert.equal(existsSync(countPath), false);
 });
 
 test("SIGTERM stops a long-running command and its process group", async () => {
