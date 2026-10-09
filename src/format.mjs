@@ -34,7 +34,24 @@ export function formatDetails(job) {
 	return lines.join("\n").replace(/\r\n?/g, "\n");
 }
 
-export function formatEvent(job) {
+export function formatEvent(event) {
+	const job = event.job;
+	if (event.kind === "signal") {
+		const signal = event.signal;
+		return [
+			"[job signal]",
+			"id: " + job.id,
+			"label: " + job.label,
+			"status: " + job.status,
+			"signal_sequence: " + signal.sequence,
+			"signal_type: " + signal.type,
+			"level: " + signal.level,
+			signal.emittedAt ? "emitted_at: " + new Date(signal.emittedAt).toISOString() : undefined,
+			"message: " + signal.message,
+			signal.details !== undefined ? "details: " + JSON.stringify(signal.details) : undefined,
+			"The background job is still running unless its status says otherwise. Reassess the event and respond as appropriate.",
+		].filter(Boolean).join("\n");
+	}
 	return [
 		"[job event]",
 		"id: " + job.id,

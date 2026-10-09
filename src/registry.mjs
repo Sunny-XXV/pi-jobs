@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { jobPaths, listJobIds, readJson, readTail, TERMINAL_STATUSES } from "./store.mjs";
+import { jobPaths, listJobIds, readJobSignals, readJson, readTail, TERMINAL_STATUSES } from "./store.mjs";
 
 function alive(pid) {
 	if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -36,6 +36,7 @@ function normalizeState(id, config, state, paths) {
 	}
 	return {
 		...base,
+		events: readJobSignals(paths.eventsPath),
 		lastStdout: readTail(paths.stdoutPath),
 		lastStderr: readTail(paths.stderrPath),
 		runnerStderr: readTail(paths.runnerStderrPath, 6 * 1024),

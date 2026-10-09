@@ -7,7 +7,7 @@ export class WakeRuntime {
 
 	messageStart(message) {
 		if (this.active || message?.role !== "custom" || message.customType !== "job-event") return false;
-		if (!this.ledger.started(message.details)) return false;
+		if (!this.ledger.started(message.details?.event)) return false;
 		this.active = true;
 		this.assistantCompleted = false;
 		return true;

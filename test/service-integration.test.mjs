@@ -82,6 +82,27 @@ integration("launchd job survives client recreation without duplicate submission
 	assert.match(completed.lastStdout, /done/);
 });
 
+integration("launchd exposes running events without ending the command", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-jobs-launchd-event-"));
+	const sessionId = "integration-event-" + Date.now();
+	const registry = createRegistry(root, sessionId);
+	const started = await registry.start({
+		label: "running event test",
+		command: `printf '%s\\n' '{"type":"bridge.disconnected","level":"error","message":"offline"}' >> "$PI_JOB_EVENT"; sleep 2`,
+		cwd: root,
+		timeoutMs: 10_000,
+		terminateTurn: true,
+	});
+	t.after(() => {
+		try { registry.stop(started.id); } catch {}
+		try { registry.remove(started.id); } catch {}
+	});
+	const signaled = await waitFor(() => registry.get(started.id), (job) => job.status === "running" && job.events?.length === 1);
+	assert.equal(signaled.events[0].type, "bridge.disconnected");
+	assert.equal(signaled.events[0].message, "offline");
+	assert.ok(signaled.pid);
+});
+
 integration("launchd signal readiness proves the command reached its checkpoint", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "pi-jobs-launchd-ready-"));
 	const sessionId = "integration-ready-" + Date.now();

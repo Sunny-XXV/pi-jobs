@@ -1,5 +1,27 @@
 import { join } from "node:path";
-import { atomicWriteJson, readJson } from "./store.mjs";
+import { atomicWriteJson, readJson, TERMINAL_STATUSES } from "./store.mjs";
+
+function terminalEvent(job) {
+	if (!TERMINAL_STATUSES.has(job.status) || !(job.eventSeq > 0)) return undefined;
+	return {
+		key: `${job.id}:terminal:${job.eventSeq}`,
+		kind: "terminal",
+		id: job.id,
+		sequence: job.eventSeq,
+		job,
+	};
+}
+
+function signalEvents(job) {
+	return (job.events ?? []).map((signal) => ({
+		key: `${job.id}:signal:${signal.sequence}`,
+		kind: "signal",
+		id: job.id,
+		sequence: signal.sequence,
+		job,
+		signal,
+	}));
+}
 
 export class NotificationLedger {
 	constructor(sessionDirectory, options = {}) {
@@ -10,17 +32,42 @@ export class NotificationLedger {
 		this.retryAfterMs = options.retryAfterMs ?? 10_000;
 	}
 
+	acknowledged(event) {
+		const value = this.values[event.id];
+		if (typeof value === "number") return event.kind === "terminal" && event.sequence <= value;
+		if (!value || typeof value !== "object") return false;
+		const sequence = event.kind === "terminal" ? value.terminal ?? 0 : value.signal ?? 0;
+		return event.sequence <= sequence;
+	}
+
+	events(jobs) {
+		const events = [];
+		for (const job of jobs) {
+			events.push(...signalEvents(job));
+			const terminal = terminalEvent(job);
+			if (terminal) events.push(terminal);
+		}
+		return events.sort((left, right) => {
+			if (left.id === right.id) {
+				if (left.kind !== right.kind) return left.kind === "signal" ? -1 : 1;
+				return left.sequence - right.sequence;
+			}
+			const leftTime = left.kind === "signal" ? left.signal.emittedAt ?? left.job.createdAt : left.job.finishedAt ?? left.job.createdAt;
+			const rightTime = right.kind === "signal" ? right.signal.emittedAt ?? right.job.createdAt : right.job.finishedAt ?? right.job.createdAt;
+			return leftTime - rightTime || left.key.localeCompare(right.key);
+		});
+	}
+
 	unacknowledged(jobs) {
-		return jobs.filter((job) => (job.eventSeq ?? 0) > (this.values[job.id] ?? 0));
+		return this.events(jobs).filter((event) => !this.acknowledged(event));
 	}
 
 	pending(jobs, options = {}) {
 		const retryUnstarted = options.retryUnstarted === true;
 		const now = this.now();
-		return this.unacknowledged(jobs).filter((job) => {
-			const sequence = job.eventSeq ?? 0;
-			const delivery = this.inflight.get(job.id);
-			if (!delivery || delivery.sequence < sequence) return true;
+		return this.unacknowledged(jobs).filter((event) => {
+			const delivery = this.inflight.get(event.key);
+			if (!delivery) return true;
 			return retryUnstarted && !delivery.started && now - delivery.sentAt >= this.retryAfterMs;
 		});
 	}
@@ -28,68 +75,79 @@ export class NotificationLedger {
 	next(jobs, options = {}) {
 		const pending = this.pending(jobs, options);
 		if (this.inflight.size === 0) return pending[0];
-		return pending.find((job) => this.inflight.has(job.id));
+		return pending.find((event) => this.inflight.has(event.key));
 	}
 
 	hasInflight() {
 		return this.inflight.size > 0;
 	}
 
-	sent(job) {
-		this.inflight.set(job.id, { sequence: job.eventSeq ?? 0, sentAt: this.now(), started: false });
+	sent(event) {
+		this.inflight.set(event.key, { event, sentAt: this.now(), started: false });
 	}
 
-	started(job) {
-		const sequence = job?.eventSeq ?? 0;
-		const delivery = job?.id ? this.inflight.get(job.id) : undefined;
-		if (!delivery || delivery.sequence !== sequence) return false;
+	started(event) {
+		const delivery = event?.key ? this.inflight.get(event.key) : undefined;
+		if (!delivery) return false;
 		delivery.started = true;
 		return true;
 	}
 
-	failed(job) {
-		const delivery = this.inflight.get(job.id);
-		if (delivery?.sequence === (job.eventSeq ?? 0)) this.inflight.delete(job.id);
+	failed(event) {
+		this.inflight.delete(event.key);
 	}
 
 	confirmStarted() {
 		const confirmations = [];
-		for (const [id, delivery] of this.inflight) {
-			if (!delivery.started) continue;
-			if (delivery.sequence > (this.values[id] ?? 0)) confirmations.push([id, delivery.sequence]);
+		for (const delivery of this.inflight.values()) {
+			if (delivery.started) confirmations.push(delivery.event);
 		}
 		if (confirmations.length === 0) return false;
 		const values = readJson(this.path, {});
-		for (const [id, sequence] of confirmations) values[id] = Math.max(sequence, values[id] ?? 0);
+		for (const event of confirmations) {
+			const existing = values[event.id];
+			const normalized = typeof existing === "number" ? { terminal: existing, signal: 0 }
+				: existing && typeof existing === "object" ? { terminal: existing.terminal ?? 0, signal: existing.signal ?? 0 }
+				: { terminal: 0, signal: 0 };
+			normalized[event.kind] = Math.max(event.sequence, normalized[event.kind]);
+			values[event.id] = normalized;
+		}
 		atomicWriteJson(this.path, values);
 		this.values = values;
-		for (const [id] of confirmations) this.inflight.delete(id);
+		for (const event of confirmations) this.inflight.delete(event.key);
 		return true;
 	}
 
 	retryStarted() {
 		let changed = false;
-		for (const [id, delivery] of this.inflight) {
+		for (const [key, delivery] of this.inflight) {
 			if (!delivery.started) continue;
-			this.inflight.delete(id);
+			this.inflight.delete(key);
 			changed = true;
 		}
 		return changed;
 	}
 
-	ack(job) {
-		const sequence = job.eventSeq ?? 0;
+	ack(value) {
+		const event = value?.key ? value : terminalEvent(value);
+		if (!event || this.acknowledged(event)) return false;
 		const values = readJson(this.path, {});
-		if (sequence <= (values[job.id] ?? 0)) return false;
-		values[job.id] = sequence;
+		const existing = values[event.id];
+		const normalized = typeof existing === "number" ? { terminal: existing, signal: 0 }
+			: existing && typeof existing === "object" ? { terminal: existing.terminal ?? 0, signal: existing.signal ?? 0 }
+			: { terminal: 0, signal: 0 };
+		normalized[event.kind] = Math.max(event.sequence, normalized[event.kind]);
+		values[event.id] = normalized;
 		atomicWriteJson(this.path, values);
 		this.values = values;
-		this.inflight.delete(job.id);
+		this.inflight.delete(event.key);
 		return true;
 	}
 
 	forget(id) {
-		this.inflight.delete(id);
+		for (const [key, delivery] of this.inflight) {
+			if (delivery.event.id === id) this.inflight.delete(key);
+		}
 		const values = readJson(this.path, {});
 		if (!(id in values)) return;
 		delete values[id];
@@ -99,8 +157,8 @@ export class NotificationLedger {
 
 	prune(jobs) {
 		const retained = new Set(jobs.map((job) => job.id));
-		for (const id of this.inflight.keys()) {
-			if (!retained.has(id)) this.inflight.delete(id);
+		for (const [key, delivery] of this.inflight) {
+			if (!retained.has(delivery.event.id)) this.inflight.delete(key);
 		}
 		const values = readJson(this.path, {});
 		let changed = false;

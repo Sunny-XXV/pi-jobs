@@ -76,7 +76,7 @@ export class ServiceManager {
 		const timeoutMs = Math.max(1_000, Number(spec.timeoutMs) || 86_400_000);
 		const readiness = spec.readiness === "signal" ? "signal" : "process";
 		const readyTimeoutMs = Math.min(timeoutMs, Math.max(1_000, Number(spec.readyTimeoutMs) || 30_000));
-		const capturedEnvironment = { ...process.env, PI_JOB_READY: paths.readyPath };
+		const capturedEnvironment = { ...process.env, PI_JOB_READY: paths.readyPath, PI_JOB_EVENT: paths.eventsPath };
 		delete capturedEnvironment.PI_SESSION_ID;
 		delete capturedEnvironment.PI_SESSION_FILE;
 		const config = {

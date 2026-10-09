@@ -22,10 +22,10 @@ export default function registerRpcE2eProvider(pi: ExtensionAPI) {
 				const last = context.messages.at(-1) as any;
 				const jobEvent = last?.role === "custom" && last.customType === "job-event" ? last : undefined;
 				const content = hasToolResult || jobEvent
-					? [{ type: "text", text: jobEvent ? `handled job ${jobEvent.details?.id ?? "unknown"}` : "job submitted" }]
+					? [{ type: "text", text: jobEvent ? `handled job ${jobEvent.details?.event?.id ?? "unknown"}` : "job submitted" }]
 					: [{ type: "toolCall", id: "call-job", name: "jobs", arguments: {
 						action: "run",
-						command: "sleep 1; printf done",
+						command: `printf '%s\\n' '{"type":"service.disconnected","level":"error","message":"offline"}' >> "$PI_JOB_EVENT"; sleep 1; printf '%s\\n' '{"type":"service.recovered","level":"info","message":"online"}' >> "$PI_JOB_EVENT"; sleep 1; printf '%s\\n' '{"type":"service.disconnected","level":"error","message":"offline again"}' >> "$PI_JOB_EVENT"; sleep 1; printf done`,
 						label: "rpc-e2e",
 						timeout_seconds: 20,
 						readiness: "process",

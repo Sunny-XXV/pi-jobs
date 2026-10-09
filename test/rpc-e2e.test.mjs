@@ -39,7 +39,7 @@ function waitFor(predicate, timeoutMs = 20_000) {
 	});
 }
 
-enabled("Pi RPC terminates after readiness, wakes once on completion, and durably acknowledges", async (t) => {
+enabled("Pi RPC wakes for a running signal and later completion, then durably acknowledges both", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "pi-jobs-rpc-e2e-"));
 	const sessionId = "pi-jobs-rpc-e2e-" + Date.now();
 	const child = spawn(PI, [
@@ -84,21 +84,32 @@ enabled("Pi RPC terminates after readiness, wakes once on completion, and durabl
 	});
 
 	child.stdin.write(JSON.stringify({ id: "prompt", type: "prompt", message: "run the test job" }) + "\n");
-	await waitFor(() => events.filter((event) => event.type === "agent_settled").length >= 2);
+	await waitFor(() => events.filter((event) => event.type === "agent_settled").length >= 5);
 
 	const toolEnd = events.find((event) => event.type === "tool_execution_end" && event.toolName === "jobs");
 	assert.equal(toolEnd?.result?.terminate, true, stdout);
 	assert.equal(toolEnd?.result?.details?.job?.readinessEvidence, "process", stdout);
 	const jobEvents = events.filter((event) => event.type === "message_start" && event.message?.customType === "job-event");
-	assert.equal(jobEvents.length, 1, stdout);
-	assert.equal(jobEvents[0].message.details.status, "completed");
+	assert.equal(jobEvents.length, 4, stdout);
+	assert.equal(jobEvents[0].message.details.event.kind, "signal");
+	assert.equal(jobEvents[0].message.details.event.signal.type, "service.disconnected");
+	assert.equal(jobEvents[0].message.details.event.job.status, "running");
+	assert.equal(jobEvents[1].message.details.event.kind, "signal");
+	assert.equal(jobEvents[1].message.details.event.signal.type, "service.recovered");
+	assert.equal(jobEvents[1].message.details.event.job.status, "running");
+	assert.equal(jobEvents[2].message.details.event.kind, "signal");
+	assert.equal(jobEvents[2].message.details.event.signal.type, "service.disconnected");
+	assert.equal(jobEvents[2].message.details.event.job.status, "running");
+	assert.equal(jobEvents[3].message.details.event.kind, "terminal");
+	assert.equal(jobEvents[3].message.details.event.job.status, "completed");
 	assert.equal(events.filter((event) => event.type === "extension_error").length, 0, stderr);
 
 	const ledgerPath = join(sessionDirectory(sessionId), "notifications.json");
 	await waitFor(() => existsSync(ledgerPath));
 	const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
-	assert.equal(ledger[jobEvents[0].message.details.id], 1);
+	const jobId = jobEvents[0].message.details.event.id;
+	assert.deepEqual(ledger[jobId], { terminal: 1, signal: 3 });
 
 	await new Promise((resolveWait) => setTimeout(resolveWait, 1_200));
-	assert.equal(events.filter((event) => event.type === "message_start" && event.message?.customType === "job-event").length, 1, stdout);
+	assert.equal(events.filter((event) => event.type === "message_start" && event.message?.customType === "job-event").length, 4, stdout);
 });

@@ -35,6 +35,7 @@ type Job = {
 	runnerStderr?: string;
 	error?: string;
 	eventSeq?: number;
+	events?: Array<{ sequence: number; type: string; level: "info" | "warning" | "error"; message: string; emittedAt?: number; details?: unknown }>;
 };
 
 const IdParams = (action: "show" | "stop" | "retry" | "remove") => Type.Object({
@@ -98,6 +99,30 @@ function renderPanel(lines: string[], width: number, height: number): string[] {
 
 function terminal(job: Job): boolean {
 	return TERMINAL_STATUSES.has(job.status);
+}
+
+function messageEvent(event: any) {
+	const job = event.job as Job;
+	const summary = {
+		id: job.id,
+		parentId: job.parentId,
+		label: job.label,
+		status: job.status,
+		readiness: job.readiness,
+		terminateTurn: job.terminateTurn,
+		createdAt: job.createdAt,
+		startedAt: job.startedAt,
+		finishedAt: job.finishedAt,
+		exitCode: job.exitCode,
+		signal: job.signal,
+		error: job.error,
+		eventSeq: job.eventSeq,
+		lastStdout: event.kind === "terminal" ? job.lastStdout : undefined,
+		lastStderr: event.kind === "terminal" ? job.lastStderr : undefined,
+	};
+	return event.kind === "signal"
+		? { key: event.key, kind: event.kind, id: event.id, sequence: event.sequence, job: summary, signal: event.signal }
+		: { key: event.key, kind: event.kind, id: event.id, sequence: event.sequence, job: summary };
 }
 
 async function openJobsDashboard(registry: JobRegistry, removeJob: (id: string) => number, ctx: ExtensionContext): Promise<void> {
@@ -253,15 +278,16 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		delivering = true;
 		try {
 			updateStatus();
-			const job = ledger.next(registry.list() as Job[], { retryUnstarted: currentCtx.isIdle() });
-			if (job && currentCtx && ledger) {
-				const message = { customType: "job-event", content: formatEvent(job), display: true, details: job };
+			const event = ledger.next(registry.list() as Job[], { retryUnstarted: currentCtx.isIdle() });
+			if (event && currentCtx && ledger) {
+				const job = event.job as Job;
+				const message = { customType: "job-event", content: formatEvent(event), display: true, details: { event: messageEvent(event) } };
 				try {
-					ledger.sent(job);
+					ledger.sent(event);
 					if (currentCtx.isIdle()) pi.sendMessage(message, { triggerTurn: true });
 					else pi.sendMessage(message, { triggerTurn: true, deliverAs: job.terminateTurn === false ? "steer" : "followUp" });
 				} catch (error) {
-					ledger.failed(job);
+					ledger.failed(event);
 					throw error;
 				}
 			}
@@ -330,9 +356,10 @@ export default function jobsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerMessageRenderer("job-event", (message, { outputPad }, theme) => {
-		const job = message.details as Job | undefined;
-		const succeeded = job?.status === "completed";
-		const title = job ? `job ${job.status}: ${job.label} (${job.id})` : "job event";
+		const event = (message.details as { event?: { kind?: string; job?: Job; signal?: { level?: string } } } | undefined)?.event;
+		const job = event?.job;
+		const succeeded = event?.kind === "signal" ? event.signal?.level !== "error" : job?.status === "completed";
+		const title = job ? event?.kind === "signal" ? `job notification: ${job.label} (${job.id})` : `job ${job.status}: ${job.label} (${job.id})` : "job event";
 		const text = theme.fg("toolTitle", theme.bold(title))
 			+ "\n" + theme.fg("toolOutput", String(message.content));
 		const box = new Box(outputPad, 1, (line) => theme.bg(succeeded ? "toolSuccessBg" : "toolErrorBg", line));
@@ -347,14 +374,16 @@ export default function jobsExtension(pi: ExtensionAPI) {
 			"Run and manage session-scoped background jobs through launchd on macOS or systemd on Linux. Jobs survive /reload without restarting the command, and are stopped when the owning Pi session ends or is replaced.",
 			"Use action=run for one execution, including long-running SQL, builds, or a user-defined watchdog loop. A command is never automatically submitted twice.",
 			"Before returning, process readiness confirms both runner and command PIDs. For jobs that can fail silently after spawn, use readiness=signal and make the command touch $PI_JOB_READY only after external submission or its first successful health check.",
-			"The default terminate_turn=true ends the current model turn only after readiness is confirmed. Terminal completion is delivered through a durable at-least-once wake; duplicate reminders are preferable to a lost wake. Set false only when useful foreground work should continue independently.",
+			"A long-running command may append one JSON object per line to $PI_JOB_EVENT to wake Pi without exiting; use it for sparse state transitions such as disconnected and recovered, not routine healthy samples.",
+			"The default terminate_turn=true ends the current model turn only after readiness is confirmed. Running signals and terminal completion share a durable serialized at-least-once wake; duplicate reminders are preferable to a lost wake. Set false only when useful foreground work should continue independently.",
 			"Use list/show/stop/retry/remove for management. retry is the only operation that deliberately creates another execution of a finished job.",
 		].join(" "),
 		promptSnippet: "Run one durable background command and wake this session at terminal completion",
 		promptGuidelines: [
 			"Use jobs run instead of agent-driven polling for long SQL, builds, and quiet watchdog loops.",
 			"When ending the turn depends on proof beyond a spawned PID, set readiness=signal and make the command touch $PI_JOB_READY only after remote submission is accepted or the watchdog completes its first successful health check.",
-			"After a successful terminating run call, do not poll jobs yourself; wait for the durable terminal event to wake the session.",
+			"For a self-recovering watchdog, append NDJSON state transitions to $PI_JOB_EVENT so it can wake Pi while remaining alive; suppress repeated healthy-state messages.",
+			"After a successful terminating run call, do not poll jobs yourself; wait for durable running or terminal events to wake the session.",
 		],
 		parameters: Params,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

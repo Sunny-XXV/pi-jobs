@@ -41,13 +41,14 @@ test("run executes exactly once even when the command fails", async () => {
 	assert.equal(JSON.parse(readFileSync(paths.statePath, "utf8")).status, "failed");
 });
 
-test("signal readiness path is exposed only to the command environment", async () => {
+test("readiness and running-event paths are exposed only to the command environment", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-jobs-ready-env-"));
-	const configured = config(root, { command: 'test -n "$PI_JOB_READY" && touch "$PI_JOB_READY"' });
-	atomicWriteJson(configured.paths.envPath, { ...process.env, PI_JOB_READY: configured.paths.readyPath });
+	const configured = config(root, { command: 'test -n "$PI_JOB_READY" && test -n "$PI_JOB_EVENT" && touch "$PI_JOB_READY" && printf \'{"type":"probe","message":"alive"}\\n\' >> "$PI_JOB_EVENT"' });
+	atomicWriteJson(configured.paths.envPath, { ...process.env, PI_JOB_READY: configured.paths.readyPath, PI_JOB_EVENT: configured.paths.eventsPath });
 	const state = await runJob(configured.configPath);
 	assert.equal(state.status, "completed");
 	assert.equal(existsSync(configured.paths.readyPath), true);
+	assert.match(readFileSync(configured.paths.eventsPath, "utf8"), /"probe"/);
 	assert.equal(existsSync(configured.paths.envPath), false);
 });
 

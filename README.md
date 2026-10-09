@@ -20,20 +20,22 @@ A job executes one Bash command exactly once:
 
 A failed, interrupted, or timed-out job is never automatically restarted. Each job creates an atomic execution claim before launching its command, so accidentally starting the same OS service again cannot submit the command twice. `retry` is the only operation that deliberately creates another execution under a new job ID.
 
-Polling and retry policy belong in the command itself. A quiet watchdog can stay out of the model context while healthy and exit only when attention is required:
+Polling and retry policy belong in the command itself. A quiet watchdog can stay out of the model context while healthy and emit sparse transition events without exiting:
 
 ```json
 {
   "action": "run",
   "label": "remote-control watchdog",
-  "command": "remote-control-is-healthy || exit 1; touch \"$PI_JOB_READY\"; while remote-control-is-healthy; do sleep 30; done; echo 'remote control disconnected' >&2; exit 1",
+  "command": "remote-control-is-healthy || exit 1; touch \"$PI_JOB_READY\"; last=healthy; while true; do if remote-control-is-healthy; then state=healthy; type=remote-control.recovered; level=info; message='remote control recovered'; else state=disconnected; type=remote-control.disconnected; level=error; message='remote control disconnected'; fi; [ \"$state\" = \"$last\" ] || printf '{\"type\":\"%s\",\"level\":\"%s\",\"message\":\"%s\"}\\n' \"$type\" \"$level\" \"$message\" >> \"$PI_JOB_EVENT\"; last=$state; sleep 30; done",
   "readiness": "signal",
   "ready_timeout_seconds": 10,
   "timeout_seconds": 86400
 }
 ```
 
-This keeps pi-jobs small: it supervises one process; the process defines its own behavior.
+`PI_JOB_EVENT` is a private append-only NDJSON path. Each complete line becomes one durable `job-event` wake while the command keeps running. A line may contain `type`, `level` (`info`, `warning`, or `error`), `message`, optional `details`, and optional numeric `emittedAt`. The watchdog should emit state transitions rather than repeated healthy samples. Partial trailing lines are ignored until completed with a newline; invalid JSON is delivered as an explicit error event instead of silently discarded.
+
+Running signals and terminal completion share the same serialized at-least-once outbox, so a later signal cannot overtake an unresolved one and final completion follows earlier signals. This keeps pi-jobs small: it supervises one process; the process defines its own behavior.
 
 ## Readiness and wake reliability
 
@@ -53,7 +55,7 @@ For commands that can spawn successfully but fail silently before doing useful w
 
 The command receives `PI_JOB_READY`, a private per-job path. It should create that file only after the external service accepted the work, or after a watchdog completed its first successful health check. If readiness is not proven before the deadline, pi-jobs stops the job and returns an error without ending the turn. A command that finishes successfully during readiness verification is reported immediately; failure before signaling readiness is an error.
 
-Terminal events use a durable at-least-once wake path. The event remains pending until its triggered agent run produces an assistant response and settles. A crash, reload, or provider failure before that confirmation causes redelivery; in the narrow ambiguous case this may create a duplicate reminder, which is intentionally preferred over silently losing the wake.
+Running signals and terminal events use one durable at-least-once wake path. An event remains pending until its triggered agent run produces an assistant response and settles. A crash, reload, or provider failure before that confirmation causes redelivery; in the narrow ambiguous case this may create a duplicate reminder, which is intentionally preferred over silently losing the wake.
 
 ## Lifecycle guarantees
 
@@ -62,7 +64,7 @@ Terminal events use a durable at-least-once wake path. The event remains pending
 - Unexpected Pi process death: each runner watches the owning Pi PID and stops its command when that process disappears.
 - Explicit stop: stops the OS service, runner, and command process group.
 - Startup: the tool returns only after process readiness, or optional business-level signal readiness, has been confirmed.
-- Completion: terminal success, failure, timeout, or stop wakes Pi through a durable at-least-once outbox.
+- Events: command-authored `PI_JOB_EVENT` signals and terminal success, failure, timeout, or stop all wake Pi through one durable serialized at-least-once outbox.
 - Output: stdout/stderr are stored per job and exposed as bounded tails to Pi.
 - State directories and files use modes `0700` and `0600`; the inherited command environment is passed through a private one-shot file that the runner deletes before launching the command.
 
@@ -110,7 +112,7 @@ pi --extension ./index.ts
 
 ## Storage
 
-Job state lives under `~/.pi/agent/pi-jobs/sessions/<session-id>-<hash>/jobs/<job-id>/`. It contains configuration, state, output, and OS service metadata. The readiness marker path is provided only through the command environment; the inherited environment is deleted from disk before the command starts. Finished history remains available until removed from `/jobs` or through the `remove` action.
+Job state lives under `~/.pi/agent/pi-jobs/sessions/<session-id>-<hash>/jobs/<job-id>/`. It contains configuration, state, output, command events, and OS service metadata. The readiness marker and event paths are provided only through the command environment; the inherited environment is deleted from disk before the command starts. Finished history remains available until removed from `/jobs` or through the `remove` action.
 
 ## License
 
