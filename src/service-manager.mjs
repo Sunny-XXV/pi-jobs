@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { atomicWriteJson, createJobId, ensurePrivateDirectory, jobPaths } from "./store.mjs";
+import { ACTIVE_STATUSES, atomicWriteJson, createJobId, ensurePrivateDirectory, jobPaths, readJson } from "./store.mjs";
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RUNNER = join(MODULE_DIR, "runner.mjs");
@@ -95,6 +95,26 @@ export class ServiceManager {
 		};
 		atomicWriteJson(join(paths.directory, "config.json"), config);
 		atomicWriteJson(paths.envPath, capturedEnvironment);
+		atomicWriteJson(paths.statePath, {
+			version: 1,
+			id,
+			parentId,
+			label: config.label,
+			mode,
+			status: "queued",
+			command: config.command,
+			cwd: config.cwd,
+			intervalMs: config.intervalMs,
+			timeoutMs,
+			checkTimeoutMs: config.checkTimeoutMs,
+			maxAttempts: config.maxAttempts,
+			terminateTurn: config.terminateTurn,
+			ownerPid: config.ownerPid,
+			attempts: 0,
+			createdAt,
+			deadlineAt: createdAt + timeoutMs,
+			eventSeq: 0,
+		});
 		atomicWriteJson(paths.controlPath, { version: 1, backend: this.backend, serviceName, createdAt });
 		try {
 			if (this.backend === "launchd") this.#startLaunchd(config, paths);
@@ -147,17 +167,34 @@ export class ServiceManager {
 		const paths = jobPaths(this.sessionDirectory, id);
 		const control = readControl(paths.controlPath);
 		if (!control) return false;
+		let stopped = false;
 		if (control.backend === "launchd") {
 			const result = shell("/bin/launchctl", ["bootout", "gui/" + process.getuid() + "/" + control.serviceName]);
-			return result.code === 0 || /could not find service|no such process/i.test(result.stderr);
-		}
-		if (control.backend === "systemd") {
+			stopped = result.code === 0 || /could not find service|no such process/i.test(result.stderr);
+		} else if (control.backend === "systemd") {
 			const result = shell("systemctl", ["--user", "stop", control.serviceName]);
-			return result.code === 0;
+			stopped = result.code === 0 || /not loaded|not found|does not exist/i.test(result.stderr);
+		} else {
+			const pid = Number(control.runnerPid);
+			if (pid) {
+				try { process.kill(pid, "SIGTERM"); stopped = true; } catch {}
+			}
 		}
-		const pid = Number(control.runnerPid);
-		if (!pid) return false;
-		try { process.kill(pid, "SIGTERM"); return true; } catch { return false; }
+		if (stopped) this.#recordStopped(paths.statePath);
+		return stopped;
+	}
+
+	#recordStopped(statePath) {
+		const state = readJson(statePath, undefined);
+		if (!state || !ACTIVE_STATUSES.has(state.status)) return;
+		atomicWriteJson(statePath, {
+			...state,
+			status: "stopped",
+			finishedAt: Date.now(),
+			nextAttemptAt: undefined,
+			pid: undefined,
+			eventSeq: (state.eventSeq ?? 0) + 1,
+		});
 	}
 
 	release(id) {
