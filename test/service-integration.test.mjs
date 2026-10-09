@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -43,7 +43,10 @@ integration("launchd job survives client recreation without duplicate submission
 		try { registry.stop(started.id); } catch {}
 		try { registry.remove(started.id); } catch {}
 	});
-	const running = await waitFor(() => registry.get(started.id), (job) => job.status === "running" && job.pid && job.runnerPid);
+	const running = await waitFor(
+		() => registry.get(started.id),
+		(job) => job.status === "running" && job.pid && job.runnerPid && existsSync(countPath),
+	);
 	const originalRunnerPid = running.runnerPid;
 	const originalCommandPid = running.pid;
 	assert.equal(readFileSync(countPath, "utf8"), "submit\n");
