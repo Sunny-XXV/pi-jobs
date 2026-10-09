@@ -96,4 +96,21 @@ export class NotificationLedger {
 		atomicWriteJson(this.path, values);
 		this.values = values;
 	}
+
+	prune(jobs) {
+		const retained = new Set(jobs.map((job) => job.id));
+		for (const id of this.inflight.keys()) {
+			if (!retained.has(id)) this.inflight.delete(id);
+		}
+		const values = readJson(this.path, {});
+		let changed = false;
+		for (const id of Object.keys(values)) {
+			if (retained.has(id)) continue;
+			delete values[id];
+			changed = true;
+		}
+		if (changed) atomicWriteJson(this.path, values);
+		this.values = values;
+		return changed;
+	}
 }

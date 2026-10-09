@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Box, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { parseJobsCommand, jobsCommandUsage } from "./src/command.mjs";
 import { formatDetails, formatEvent, formatList } from "./src/format.mjs";
@@ -100,7 +100,7 @@ function terminal(job: Job): boolean {
 	return TERMINAL_STATUSES.has(job.status);
 }
 
-async function openJobsDashboard(registry: JobRegistry, ctx: ExtensionContext): Promise<void> {
+async function openJobsDashboard(registry: JobRegistry, removeJob: (id: string) => number, ctx: ExtensionContext): Promise<void> {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify(formatList(registry.list()), "info");
 		return;
@@ -181,7 +181,7 @@ async function openJobsDashboard(registry: JobRegistry, ctx: ExtensionContext): 
 					if (data.toLowerCase() === "y" && job) {
 						try {
 							if (action === "stop") notice = registry.stop(job.id) ? "Stop requested for " + job.id : "Job is no longer active";
-							else if (action === "remove") notice = registry.remove(job.id) ? "Removed " + job.id : "Only finished jobs can be removed";
+							else if (action === "remove") notice = removeJob(job.id) ? "Removed " + job.id : "Only finished jobs can be removed";
 							else {
 								notice = `Starting retry of ${job.id}…`;
 								void registry.retry(job.id).then((retried: Job) => {
@@ -203,8 +203,8 @@ async function openJobsDashboard(registry: JobRegistry, ctx: ExtensionContext): 
 				else if (matchesKey(data, "down") || data === "j") { selected = Math.min(Math.max(0, filtered().length - 1), selected + 1); follow = true; notice = ""; }
 				else if (matchesKey(data, "tab")) { filter = filter === "all" ? "active" : filter === "active" ? "finished" : "all"; selected = 0; follow = true; }
 				else if (data === "f") { follow = !follow; if (follow) outputOffset = maxOutputOffset; }
-				else if (matchesKey(data, "pageup")) { follow = false; outputOffset = Math.max(0, outputOffset - 8); }
-				else if (matchesKey(data, "pagedown")) { outputOffset = Math.min(maxOutputOffset, outputOffset + 8); follow = outputOffset === maxOutputOffset; }
+				else if (matchesKey(data, "pageUp")) { follow = false; outputOffset = Math.max(0, outputOffset - 8); }
+				else if (matchesKey(data, "pageDown")) { outputOffset = Math.min(maxOutputOffset, outputOffset + 8); follow = outputOffset === maxOutputOffset; }
 				else if (data === "x" && job && !terminal(job)) confirm = "stop";
 				else if (data === "d" && job && terminal(job)) confirm = "remove";
 				else if (data === "r" && job && terminal(job)) confirm = "retry";
@@ -220,12 +220,22 @@ export default function jobsExtension(pi: ExtensionAPI) {
 	let registry: JobRegistry | undefined;
 	let ledger: NotificationLedger | undefined;
 	let pollTimer: ReturnType<typeof setInterval> | undefined;
+	let activationTimer: ReturnType<typeof setTimeout> | undefined;
+	let deliveryGeneration = 0;
+	let deliveryActive = false;
 	let delivering = false;
 	let wakeRuntime: WakeRuntime | undefined;
 
 	const requireRegistry = () => {
 		if (!registry) throw new Error("Pi Jobs is not attached to a session");
 		return registry;
+	};
+
+	const removeJobs = (id: string) => {
+		const jobs = requireRegistry();
+		const count = jobs.remove(id);
+		if (count && ledger) ledger.prune(jobs.list());
+		return count;
 	};
 
 	let lastStatusText: string | undefined;
@@ -239,7 +249,7 @@ export default function jobsExtension(pi: ExtensionAPI) {
 	};
 
 	const deliverEvents = async () => {
-		if (delivering || !currentCtx || !registry || !ledger) return;
+		if (!deliveryActive || delivering || !currentCtx || !registry || !ledger) return;
 		delivering = true;
 		try {
 			updateStatus();
@@ -262,6 +272,8 @@ export default function jobsExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		currentCtx = ctx;
+		deliveryGeneration += 1;
+		deliveryActive = false;
 		const sessionId = ctx.sessionManager.getSessionId();
 		const paths = sessionPaths(sessionId);
 		ensurePrivateDirectory(paths.jobsDirectory);
@@ -269,9 +281,21 @@ export default function jobsExtension(pi: ExtensionAPI) {
 		registry = new JobRegistry({ sessionDirectory: paths.directory, serviceManager });
 		ledger = new NotificationLedger(paths.directory);
 		wakeRuntime = new WakeRuntime(ledger);
-		pollTimer = setInterval(() => void deliverEvents(), 750);
-		pollTimer.unref?.();
-		void deliverEvents();
+	});
+
+	pi.on("resources_discover", () => {
+		if (activationTimer) clearTimeout(activationTimer);
+		const generation = deliveryGeneration;
+		activationTimer = setTimeout(() => {
+			activationTimer = undefined;
+			if (generation !== deliveryGeneration || !currentCtx || !registry || !ledger) return;
+			deliveryActive = true;
+			if (pollTimer) clearInterval(pollTimer);
+			pollTimer = setInterval(() => void deliverEvents(), 750);
+			pollTimer.unref?.();
+			void deliverEvents();
+		}, 0);
+		activationTimer.unref?.();
 	});
 
 	pi.on("message_start", (event) => {
@@ -289,6 +313,10 @@ export default function jobsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		deliveryGeneration += 1;
+		deliveryActive = false;
+		if (activationTimer) clearTimeout(activationTimer);
+		activationTimer = undefined;
 		if (pollTimer) clearInterval(pollTimer);
 		pollTimer = undefined;
 		if (event.reason !== "reload" && registry) registry.stop("all");
@@ -303,15 +331,13 @@ export default function jobsExtension(pi: ExtensionAPI) {
 
 	pi.registerMessageRenderer("job-event", (message, { outputPad }, theme) => {
 		const job = message.details as Job | undefined;
-		const color = statusColor(job?.status ?? "failed");
+		const succeeded = job?.status === "completed";
 		const title = job ? `job ${job.status}: ${job.label} (${job.id})` : "job event";
-		return {
-			render(width: number): string[] {
-				const pad = " ".repeat(outputPad);
-				return [theme.fg(color, theme.bold(title)), ...String(message.content).split("\n").flatMap((line) => wrapTextWithAnsi(pad + line, width))];
-			},
-			invalidate(): void {},
-		};
+		const text = theme.fg("toolTitle", theme.bold(title))
+			+ "\n" + theme.fg("toolOutput", String(message.content));
+		const box = new Box(outputPad, 1, (line) => theme.bg(succeeded ? "toolSuccessBg" : "toolErrorBg", line));
+		box.addChild(new Text(text, 0, 0));
+		return box;
 	});
 
 	pi.registerTool({
@@ -350,8 +376,7 @@ export default function jobsExtension(pi: ExtensionAPI) {
 			}
 			if (params.action === "remove") {
 				if (!params.id) throw new Error("id is required for action=remove");
-				const count = jobs.remove(params.id);
-				if (params.id !== "finished") ledger?.forget(params.id);
+				const count = removeJobs(params.id);
 				return { content: [{ type: "text", text: count ? `Removed ${count} finished job(s).` : `No finished job matched ${params.id}.` }], details: { action: "remove", count } };
 			}
 			if (params.action === "retry") {
@@ -400,7 +425,7 @@ export default function jobsExtension(pi: ExtensionAPI) {
 			const jobs = requireRegistry();
 			const request = parseJobsCommand(args);
 			if (request.action === "help") return ctx.ui.notify(jobsCommandUsage(), "warning");
-			if (request.action === "list") return openJobsDashboard(jobs, ctx);
+			if (request.action === "list") return openJobsDashboard(jobs, removeJobs, ctx);
 			if (request.action === "show") {
 				const job = jobs.get(request.id) as Job | undefined;
 				return ctx.ui.notify(job ? formatDetails(job) : `Job ${request.id} was not found.`, job ? "info" : "warning");
@@ -410,7 +435,7 @@ export default function jobsExtension(pi: ExtensionAPI) {
 				return ctx.ui.notify(count ? `Requested stop for ${count} job(s).` : `No active job matched ${request.id}.`, count ? "info" : "warning");
 			}
 			if (request.action === "remove") {
-				const count = jobs.remove(request.id);
+				const count = removeJobs(request.id);
 				return ctx.ui.notify(count ? `Removed ${count} finished job(s).` : `No finished job matched ${request.id}.`, count ? "info" : "warning");
 			}
 			try {

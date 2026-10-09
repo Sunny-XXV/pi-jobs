@@ -62,6 +62,19 @@ test("acknowledgments from multiple extension runtimes merge instead of overwrit
 	assert.deepEqual(reloaded.pending([first, second]), []);
 });
 
+test("prune removes only ledger entries for jobs no longer retained", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-jobs-notify-prune-"));
+	const ledger = new NotificationLedger(root);
+	const removed = job("removed");
+	const retained = job("retained");
+	ledger.ack(removed);
+	ledger.ack(retained);
+	ledger.sent(job("inflight"));
+	assert.equal(ledger.prune([retained]), true);
+	assert.deepEqual(new NotificationLedger(root).pending([removed, retained]), [removed]);
+	assert.equal(ledger.hasInflight(), false);
+});
+
 test("failed delivery immediately returns an event to the outbox", () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-jobs-notify-failed-"));
 	const ledger = new NotificationLedger(root);
