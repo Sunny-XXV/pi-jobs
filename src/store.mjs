@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -58,12 +58,19 @@ export function readJson(path, fallback) {
 }
 
 export function readTail(path, maxBytes = 24 * 1024) {
+	let descriptor;
 	try {
-		const fd = readFileSync(path);
-		return (fd.length <= maxBytes ? fd : fd.subarray(fd.length - maxBytes)).toString("utf8");
+		descriptor = openSync(path, "r");
+		const size = fstatSync(descriptor).size;
+		const length = Math.min(size, maxBytes);
+		const buffer = Buffer.alloc(length);
+		readSync(descriptor, buffer, 0, length, Math.max(0, size - length));
+		return buffer.toString("utf8");
 	} catch (error) {
 		if (error && typeof error === "object" && error.code === "ENOENT") return "";
 		throw error;
+	} finally {
+		if (descriptor !== undefined) closeSync(descriptor);
 	}
 }
 
