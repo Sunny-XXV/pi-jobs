@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { parseJobsCommand, jobsCommandUsage } from "./src/command.mjs";
 import { formatDetails, formatEvent, formatList } from "./src/format.mjs";
 import { NotificationLedger } from "./src/notifications.mjs";
+import { jobsPromptGuidelines, jobsPromptSnippet } from "./src/prompt.mjs";
 import { JobRegistry } from "./src/registry.mjs";
 import { ServiceManager } from "./src/service-manager.mjs";
 import { ensurePrivateDirectory, sessionPaths, TERMINAL_STATUSES } from "./src/store.mjs";
@@ -378,13 +379,8 @@ export default function jobsExtension(pi: ExtensionAPI) {
 			"The default terminate_turn=true ends the current model turn only after readiness is confirmed. Running signals and terminal completion share a durable serialized at-least-once wake; duplicate reminders are preferable to a lost wake. Set false only when useful foreground work should continue independently.",
 			"Use list/show/stop/retry/remove for management. retry is the only operation that deliberately creates another execution of a finished job.",
 		].join(" "),
-		promptSnippet: "Run one durable background command and wake this session at terminal completion",
-		promptGuidelines: [
-			"Use jobs run instead of agent-driven polling for long SQL, builds, and quiet watchdog loops.",
-			"When ending the turn depends on proof beyond a spawned PID, set readiness=signal and make the command touch $PI_JOB_READY only after remote submission is accepted or the watchdog completes its first successful health check.",
-			"For a self-recovering watchdog, append NDJSON state transitions to $PI_JOB_EVENT so it can wake Pi while remaining alive; suppress repeated healthy-state messages.",
-			"After a successful terminating run call, do not poll jobs yourself; wait for durable running or terminal events to wake the session.",
-		],
+		promptSnippet: jobsPromptSnippet,
+		promptGuidelines: jobsPromptGuidelines,
 		parameters: Params,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			currentCtx = ctx;
